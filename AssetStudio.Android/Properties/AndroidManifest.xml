@@ -38,6 +38,10 @@
        The user has to grant it manually in Settings, and Google Play does not permit it for asset
        extraction tools, so the app is fully usable without it (see StorageAccess). Note that even
        with it, other apps' Android/data directories stay out of reach. -->
+  <!-- Listing installed apps to pick one to extract. Without this, Android 11+ package visibility
+       hides everything but this app and whatever the platform whitelists. -->
+  <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
   <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
   <!-- Bundles can also be read through the Storage Access Framework (ACTION_OPEN_DOCUMENT_TREE),

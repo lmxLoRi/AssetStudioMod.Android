@@ -295,7 +295,16 @@ namespace AssetStudioMobile
         /// only place that decides how much is in memory at once.
         /// </summary>
         private void LoadBatch(int start, int count)
-            => LoadBatch(_assetsManager, _candidates, start, count, out _, out _);
+        {
+            LoadBatch(_assetsManager, _candidates, start, count, out var files, out var objects, out var parent);
+
+            // Accumulated here, not discarded. Since LoadBatch grew a static overload for the
+            // parallel workers this one quietly dropped its out parameters, so every single-batch
+            // load reported "Loaded 0 serialized file(s)" no matter how much it had actually read.
+            _lastParent = parent;
+            _loadedFiles += files;
+            _loadedObjects += objects;
+        }
 
         /// <summary>
         /// Loads one range of the scan into <paramref name="manager"/>.
@@ -306,7 +315,7 @@ namespace AssetStudioMobile
         /// race; it does not any more.
         /// </summary>
         private static void LoadBatch(AssetsManager manager, List<Candidate> candidates, int start, int count,
-                                      out int files, out int objects)
+                                      out int files, out int objects, out string parent)
         {
             // AssetsManager.LoadFilesAndFolders runs every entry through Path.GetFullPath, so it
             // needs absolute paths. Relative names would silently resolve against the process
@@ -319,7 +328,7 @@ namespace AssetStudioMobile
             // finds next to the file on disk into importFiles, and Load() drains that queue while
             // it grows, so a batch pulls in what it needs from the tree by name. A dependency
             // shared by many batches is simply loaded more than once.
-            manager.LoadFilesAndFolders(out _, paths);
+            manager.LoadFilesAndFolders(out parent, paths);
             files = manager.AssetsFileList.Count;
             objects = manager.AssetsFileList.Sum(f => f.Objects.Count);
         }
@@ -591,7 +600,7 @@ namespace AssetStudioMobile
                 NewWorker,
                 (batch, loopState, worker) =>
                 {
-                    LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var f, out var o);
+                    LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var f, out var o, out _);
                     Interlocked.Add(ref _loadedFiles, f);
                     Interlocked.Add(ref _loadedObjects, o);
                     var targets = CollectTargets(worker.Manager, options);

@@ -213,6 +213,9 @@ namespace AssetStudioMobile
             return result;
         }
 
+        /// <summary>The last path segment of a document URI's id, for naming a copy of it.</summary>
+        internal static string LeafNameOf(Android.Net.Uri uri) => LeafName(uri);
+
         private static string LeafName(Android.Net.Uri uri)
         {
             try

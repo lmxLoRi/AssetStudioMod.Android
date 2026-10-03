@@ -31,15 +31,16 @@ namespace AssetStudioMobile
             if (!string.Equals(treeUri.Authority, ExternalStorageAuthority, StringComparison.OrdinalIgnoreCase))
                 return null;
 
-            string documentId;
-            try
+            // A picked folder gives a tree URI and a picked file gives a document URI, and the two
+            // answer to different calls. Try both rather than making the caller care.
+            string documentId = null;
+            try { documentId = DocumentsContract.GetTreeDocumentId(treeUri); }
+            catch { /* not a tree URI */ }
+
+            if (string.IsNullOrEmpty(documentId))
             {
-                // GetTreeDocumentId: this is a tree URI, and GetDocumentId rejects those outright.
-                documentId = DocumentsContract.GetTreeDocumentId(treeUri);
-            }
-            catch
-            {
-                return null;
+                try { documentId = DocumentsContract.GetDocumentId(treeUri); }
+                catch { return null; }
             }
 
             if (string.IsNullOrEmpty(documentId)) return null;

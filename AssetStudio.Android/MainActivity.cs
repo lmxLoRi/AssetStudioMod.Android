@@ -18,6 +18,7 @@ namespace AssetStudioMobile
     public class MainActivity : Activity
     {
         private const int ReqPickTree = 1001;
+        private const int ReqPickApk = 1002;
 
         private TextView _status;
         private TextView _log;
@@ -106,6 +107,17 @@ namespace AssetStudioMobile
             _btnImport = new Button(this) { Text = "Pick folder" };
             _btnImport.Click += (_, __) => PickTree();
             root.AddView(_btnImport);
+
+            // An APK is a ZIP, and the loader already handles ZIPs, so both of these end the same
+            // way as picking a folder: stage the bytes somewhere readable, then Scan.
+            var apkRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+            var pickApk = new Button(this) { Text = "Pick .apk" };
+            pickApk.Click += (_, __) => PickApkFile();
+            apkRow.AddView(pickApk);
+            var fromApp = new Button(this) { Text = "Import from app" };
+            fromApp.Click += (_, __) => ChooseInstalledApp();
+            apkRow.AddView(fromApp);
+            root.AddView(apkRow);
 
             _btnScan = new Button(this) { Text = "Rescan" };
             _btnScan.Click += (_, __) => RunOnBackground(Scan);
@@ -197,6 +209,29 @@ namespace AssetStudioMobile
                 case "scan":
                     RunOnBackground(Scan);
                     break;
+                case "apk":
+                {
+                    // Scripted form of the "Import from app" button, so extracting an installed app
+                    // can be driven from adb like the rest of this.
+                    var package = intent.GetStringExtra("package");
+                    if (string.IsNullOrWhiteSpace(package))
+                    {
+                        Append("ERROR: -e package is required for action=apk");
+                        break;
+                    }
+                    RunOnBackground(() =>
+                    {
+                        var apps = ApkImport.ListInstalled(this, Append);
+                        var app = apps.Find(a => a.PackageName == package);
+                        if (app == null)
+                        {
+                            Append($"ERROR: {package} is not in the visible package list");
+                            return;
+                        }
+                        ImportInstalledApp(app);
+                    });
+                    break;
+                }
                 case "load":
                 {
                     // `adb shell input text` cannot reliably type '/' through a CJK IME, so the
@@ -353,6 +388,87 @@ namespace AssetStudioMobile
 
         // ---------------- SAF import ----------------
 
+        /// <summary>Picks a single .apk through SAF. No permission needed at all.</summary>
+        private void PickApkFile()
+        {
+            var intent = new Intent(Intent.ActionOpenDocument);
+            intent.SetType("application/vnd.android.package-archive");
+            intent.AddCategory(Intent.CategoryOpenable);
+            intent.AddFlags(ActivityFlags.GrantReadUriPermission);
+            try
+            {
+                StartActivityForResult(Intent.CreateChooser(intent, "Select an APK"), ReqPickApk);
+            }
+            catch (Exception ex)
+            {
+                Append($"ERROR: no document picker ({ex.Message})");
+            }
+        }
+
+        /// <summary>Lists installed apps and extracts the one picked.</summary>
+        private void ChooseInstalledApp()
+        {
+            RunOnBackground(() =>
+            {
+                var apps = ApkImport.ListInstalled(this, Append);
+                if (apps.Count == 0)
+                {
+                    Append("no installed apps are visible; QUERY_ALL_PACKAGES is declared, so this " +
+                           "would be a package-visibility surprise worth reporting");
+                    return;
+                }
+
+                var labels = new string[apps.Count];
+                for (var i = 0; i < apps.Count; i++) labels[i] = apps[i].ToString();
+
+                RunOnUiThread(() =>
+                {
+                    new AlertDialog.Builder(this)
+                        .SetTitle("Export from an installed app")
+                        .SetItems(labels, (_, e) =>
+                        {
+                            if (e.Which >= 0 && e.Which < apps.Count) ImportInstalledApp(apps[e.Which]);
+                        })
+                        .Show();
+                });
+            });
+        }
+
+        private void ImportInstalledApp(ApkImport.InstalledApp app)
+        {
+            RunOnBackground(() =>
+            {
+                Append($"reading {app.Label} ({app.PackageName}), {app.Apks.Length} APK file(s)");
+                var external = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
+                var dir = ApkImport.StageApks(this, app, external, Append);
+                if (dir == null)
+                {
+                    SetStatus("cannot read that app's APK");
+                    return;
+                }
+                _inputDir = dir;
+                RunOnUiThread(() => _inputPath.Text = dir);
+                Scan();
+            });
+        }
+
+        private void ImportPickedApk(Android.Net.Uri uri)
+        {
+            RunOnBackground(() =>
+            {
+                var external = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
+                var dir = ApkImport.StagePickedApk(this, uri, external, Append);
+                if (dir == null)
+                {
+                    SetStatus("cannot read the picked APK");
+                    return;
+                }
+                _inputDir = dir;
+                RunOnUiThread(() => _inputPath.Text = dir);
+                Scan();
+            });
+        }
+
         private void PickTree()
         {
             var intent = new Intent(Intent.ActionOpenDocumentTree);
@@ -370,7 +486,15 @@ namespace AssetStudioMobile
         protected override void OnActivityResult(int requestCode, Result resultCode, Intent data)
         {
             base.OnActivityResult(requestCode, resultCode, data);
-            if (requestCode != ReqPickTree || resultCode != Result.Ok || data?.Data == null) return;
+            if (resultCode != Result.Ok || data?.Data == null) return;
+
+            if (requestCode == ReqPickApk)
+            {
+                ImportPickedApk(data.Data);
+                return;
+            }
+
+            if (requestCode != ReqPickTree) return;
 
             var uri = data.Data;
 
