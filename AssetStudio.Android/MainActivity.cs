@@ -378,11 +378,10 @@ namespace AssetStudioMobile
             Append($"Exporting {options.Kind} -> {dest}");
 
             var report = _extractor.Export(dest, options);
-            Append($"matched={report.Matched} exported={report.Exported} " +
-                   $"skipped={report.Skipped} failed={report.Failed}");
+            Append(report.ToString());
 
             foreach (var e in report.Errors.Take(20)) Append("  " + e);
-            SetStatus($"Exported {report.Exported} -> {dest}");
+            SetStatus($"Exported {report.Exported}/{report.Matched} -> {Path.GetFileName(dest)}");
         }
 
         // ---------------- plumbing ----------------

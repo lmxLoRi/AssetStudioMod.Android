@@ -16,8 +16,14 @@ parsing libraries. No part of the bundle/serialized-file parsing was rewritten: 
 | Sprite → PNG | working |
 | Any asset → JSON (`Object.Dump()` / `DumpObject()`) | working |
 | TextAsset → raw bytes, any asset → raw bytes | working |
-| Mesh → OBJ | not ported yet (the OBJ writer is private to `AssetStudioCLI/Exporter.cs`) |
-| Sprite → PNG | code present, not covered by the synthetic test fixture |
+| Mesh → OBJ | working (`AssetStudioUtility/MeshExtensions.cs`) |
+| Font → .ttf/.otf | working |
+| VideoClip / MovieTexture → .mp4 | working |
+| Texture2D → PNG (via NDK decoder + ImageSharp) | working |
+| Sprite → PNG | working, not covered by the synthetic fixture |
+| Shader → decompiled text | not ported (the converter lives in the CLI) |
+| Animator / AnimationClip | not ported |
+| AudioClip → .wav/.ogg | impossible (needs FMOD), falls back to raw/JSON |
 | FBX export | **dropped on Android** (see below) |
 | Audio decoding (FMOD) | **dropped on Android** (see below) |
 | Oodle-compressed bundles | **not supported** (see below) |
@@ -221,6 +227,35 @@ you extend it:
   `Directory.GetCurrentDirectory()` (`AssetStudio/BundleFile.cs`), which is `/` on Android and
   not writable. Avoid `--decompress-to-disk`-style flows or redirect that path to
   `cacheDir`.
+
+## Export kinds
+
+`Auto` is the default and dispatches on each asset's real `ClassIDType`; the other kinds exist to
+export one category in isolation.
+
+| Type | Output |
+|---|---|
+| `Texture2D` | PNG (RGBA, DXT, ASTC, ETC, PVRTC … via `libTexture2DDecoderNative.so`) |
+| `Sprite` | PNG |
+| `Mesh` | `.obj` (vertices, UV0, normals, per-submesh groups) |
+| `TextAsset` | raw bytes |
+| `Font` | `.ttf` / `.otf` (sniffed from the `OTTO` magic) |
+| `VideoClip`, `MovieTexture` | `.mp4` |
+| everything else | JSON via `Object.Dump()` / `DumpObject()` |
+
+Nothing is skipped for lack of a checkbox: any type without a dedicated exporter falls back to a
+JSON dump, and the run summary lists which types were found and which had no exporter, so gaps
+are visible rather than silent:
+
+```
+3 asset(s): TextAsset x1 Texture2D x2
+matched=3 exported=3 skipped=0 failed=0 [TextAsset=1 Texture2D=2]
+```
+
+The `.obj` writer came from `AssetStudioCLI/Exporter.cs`, where it was private to the CLI. It is
+now in `AssetStudioUtility` so the CLI, GUI and Android app share one implementation. Porting it
+also fixed a latent bug: the original used `AppendFormat` without a culture, so under a locale
+like `de-DE` it emitted `v 0,5 0,25` and no obj importer could read the result.
 
 ## Verified end to end
 
