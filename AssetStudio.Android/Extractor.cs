@@ -824,7 +824,9 @@ namespace AssetStudioMobile
                         {
                             var t0 = Stopwatch.GetTimestamp();
                             var image = ((Texture2D)obj).ConvertToImage(opt.FlipTextures);
-                            Stats.AddTexture(Stopwatch.GetTimestamp() - t0, (long)tex.m_Width * tex.m_Height);
+                            Stats.AddTexture(tex.m_TextureFormat.ToString(),
+                                             Stopwatch.GetTimestamp() - t0,
+                                             (long)tex.m_Width * tex.m_Height);
                             WriteImage(image, dest, opt);
                         },
                     };

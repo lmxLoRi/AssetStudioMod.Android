@@ -68,6 +68,10 @@ namespace AssetStudioMobile
             // Every bundle block is LZ4; the managed codec has no SIMD path on ARM64.
             Lz4Native.Install();
 
+            // ConvertToImage reports its parts, because one number for "texture decode" cannot say
+            // whether to look at the codec, the copy, or the flip.
+            Texture2DExtensions.PhaseTiming = Stats.AddPhase;
+
             SetContentView(BuildUi());
             _inputPath.Text = _inputDir;
             _outputPath.Text = _outputDir;

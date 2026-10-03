@@ -1,12 +1,15 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Linq;
+using System.Text;
 using System.Threading;
 
 namespace AssetStudioMobile
 {
     /// <summary>
-    /// Counters for the phases that between them are the whole reason an export takes as long as
-    /// it does. Every number here is measured inside the process, on the real work, rather than
+    /// Counters for the phases that between them are the whole reason an export takes as long as it
+    /// does. Every number here is measured inside the process, on the real work, rather than
     /// inferred from log timestamps or from how fast the same library is on a desktop -- which is
     /// how a wrong "LZ4 should be 1 GB/s" figure survived several rounds of guessing.
     ///
@@ -19,17 +22,54 @@ namespace AssetStudioMobile
         private static long _encodeTicks, _encodeCount;
         private static long _rawBytes, _rawCount;
 
+        /// <summary>
+        /// Texture decoding, split by the texture's own format.
+        ///
+        /// "Texture decoding is 200s" is not actionable on its own: DXT1, DXT5, ASTC, ETC2 and PVRTC
+        /// are separate decoders in that library, and they are not equally good. This is what says
+        /// which one to look at instead of guessing, which has been wrong often enough in this
+        /// project to be worth the twenty lines.
+        /// </summary>
+        private sealed class FormatStat
+        {
+            public long Ticks;
+            public long Count;
+            public long Pixels;
+        }
+
+        private static readonly ConcurrentDictionary<string, FormatStat> ByFormat =
+            new ConcurrentDictionary<string, FormatStat>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// ConvertToImage split into its parts. Same reasoning as ByFormat: "decoding" is one number
+        /// covering a codec, a copy and a flip, and they have very different fixes.
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, long[]> ByPhase =
+            new ConcurrentDictionary<string, long[]>(StringComparer.Ordinal);
+
+        public static void AddPhase(string phase, long ticks)
+        {
+            var slot = ByPhase.GetOrAdd(phase ?? "?", _ => new long[2]);
+            Interlocked.Add(ref slot[0], ticks);
+            Interlocked.Add(ref slot[1], 1);
+        }
+
         public static void AddLz4(long ticks, int bytes)
         {
             Interlocked.Add(ref _lz4Ticks, ticks);
             Interlocked.Add(ref _lz4Bytes, bytes);
         }
 
-        public static void AddTexture(long ticks, long pixels)
+        public static void AddTexture(string format, long ticks, long pixels)
         {
             Interlocked.Add(ref _texTicks, ticks);
             Interlocked.Add(ref _texCount, 1);
             Interlocked.Add(ref _texPixels, pixels);
+
+            var stat = ByFormat.GetOrAdd(format ?? "?", _ => new FormatStat());
+            Interlocked.Add(ref stat.Ticks, ticks);
+            Interlocked.Add(ref stat.Count, 1);
+            Interlocked.Add(ref stat.Pixels, pixels);
         }
 
         public static void AddRaw(long bytes)
@@ -46,32 +86,66 @@ namespace AssetStudioMobile
 
         private static double Ms(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
 
+        private static double Hours(long ticks) => Ms(ticks) / 1000.0;
+
         public static string Report()
         {
-            var ms = Ms(Volatile.Read(ref _lz4Ticks));
-            var bytes = Volatile.Read(ref _lz4Bytes);
-            var tex = Ms(Volatile.Read(ref _texTicks));
-            var texN = Volatile.Read(ref _texCount);
-            var px = Volatile.Read(ref _texPixels);
-            var enc = Ms(Volatile.Read(ref _encodeTicks));
-            var encN = Volatile.Read(ref _encodeCount);
+            var sb = new StringBuilder();
+            sb.AppendLine();
+            sb.AppendLine("--- measured in-process ---");
 
-            var lz4 = bytes > 0
-                ? $"    LZ4 decode      {ms / 1000,8:F1}s  {bytes / 1048576.0 / (ms / 1000),7:F0} MB/s  ({bytes / 1048576} MB in)\n"
-                : "    LZ4 decode      (native decoder not installed)\n";
-            var texture = texN > 0
-                ? $"    texture decode  {tex / 1000,8:F1}s  {texN,8} images  {texN / (tex / 1000),6:F0}/s  {px / 1048576.0 / (tex / 1000),6:F0} MPix/s\n"
-                : "    texture decode  (none)\n";
-            var encode = encN > 0
-                ? $"    PNG encode+write{enc / 1000,8:F1}s  {encN,8} files   {encN / (enc / 1000),6:F0}/s\n"
-                : "    PNG encode+write(none)\n";
+            var lz4ms = Ms(Volatile.Read(ref _lz4Ticks));
+            var lz4Bytes = Volatile.Read(ref _lz4Bytes);
+            sb.AppendLine(lz4Bytes > 0
+                ? $"    LZ4 decode       {lz4ms / 1000,8:F1}s  {lz4Bytes / 1048576.0 / (lz4ms / 1000),7:F0} MB/s  ({lz4Bytes / 1048576} MB in)"
+                : "    LZ4 decode       (native decoder not installed)");
+
+            var texMs = Ms(Volatile.Read(ref _texTicks));
+            var texN = Volatile.Read(ref _texCount);
+            var texPx = Volatile.Read(ref _texPixels);
+            sb.AppendLine(texN > 0
+                ? $"    texture decode   {texMs / 1000,8:F1}s  {texN,8} images  {texN / (texMs / 1000),6:F0}/s  {texPx / 1048576.0 / (texMs / 1000),6:F0} MPix/s"
+                : "    texture decode   (none)");
+
+            var encMs = Ms(Volatile.Read(ref _encodeTicks));
+            var encN = Volatile.Read(ref _encodeCount);
+            sb.AppendLine(encN > 0
+                ? $"    PNG encode+write {encMs / 1000,8:F1}s  {encN,8} files   {encN / (encMs / 1000),6:F0}/s"
+                : "    PNG encode+write (none)");
 
             var rawN = Volatile.Read(ref _rawCount);
-            var raw = rawN > 0
-                ? $"    raw texture out {Volatile.Read(ref _rawBytes) / 1048576,8} MB  {rawN,8} files\n"
-                : "";
+            if (rawN > 0)
+                sb.AppendLine($"    raw texture out  {Volatile.Read(ref _rawBytes) / 1048576,8} MB  {rawN,8} files");
 
-            return "\n--- measured in-process ---\n" + lz4 + texture + encode + raw;
+            // Slowest format first, which is the point of keeping them apart.
+            if (ByFormat.Count > 0)
+            {
+                sb.AppendLine("    texture decode by format:");
+                foreach (var kv in ByFormat.OrderByDescending(kv => Volatile.Read(ref kv.Value.Ticks)).Take(10))
+                {
+                    var s = kv.Value;
+                    var ms = Ms(Volatile.Read(ref s.Ticks));
+                    var n = Volatile.Read(ref s.Count);
+                    var px = Volatile.Read(ref s.Pixels);
+                    if (n == 0 || ms <= 0) continue;
+
+                    sb.AppendLine($"      {kv.Key,-16} {ms / 1000,7:F1}s  {n,7} imgs  {ms / n,7:F1} ms each  {px / 1048576.0 / (ms / 1000),6:F0} MPix/s");
+                }
+            }
+
+            if (ByPhase.Count > 0)
+            {
+                sb.AppendLine("    ConvertToImage by phase:");
+                foreach (var kv in ByPhase.OrderByDescending(kv => Volatile.Read(ref kv.Value[0])))
+                {
+                    var ms = Ms(Volatile.Read(ref kv.Value[0]));
+                    var n = Volatile.Read(ref kv.Value[1]);
+                    if (n == 0 || ms <= 0) continue;
+                    sb.AppendLine($"      {kv.Key,-16} {ms / 1000,7:F1}s  {n,7} calls  {ms / n,7:F2} ms each");
+                }
+            }
+
+            return sb.ToString();
         }
     }
 }
