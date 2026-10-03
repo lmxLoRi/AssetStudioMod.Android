@@ -87,10 +87,14 @@ namespace AssetStudio
                 return false;
             }
             var flag = false;
+            var mark = System.Diagnostics.Stopwatch.GetTimestamp();
             var buff = BigArrayPool<byte>.Shared.Rent(reader.Size);
+            Texture2DExtensions.PhaseTiming?.Invoke("  read input", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
             try
             {
+                mark = System.Diagnostics.Stopwatch.GetTimestamp();
                 _ = reader.GetData(buff);
+                Texture2DExtensions.PhaseTiming?.Invoke("  read input", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
                 if (switchSwizzled)
                 {
                     var unswizzledData = BigArrayPool<byte>.Shared.Rent(reader.Size);
@@ -106,6 +110,8 @@ namespace AssetStudio
                         Logger.Error(e.Message, e);
                     }
                 }
+
+                mark = System.Diagnostics.Stopwatch.GetTimestamp();
 
                 switch (m_TextureFormat)
                 {
@@ -282,6 +288,8 @@ namespace AssetStudio
                         flag = DecodeRGBA64(buff, bytes);
                         break;
                 }
+
+                Texture2DExtensions.PhaseTiming?.Invoke("  format decode", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
             }
             finally
             {
