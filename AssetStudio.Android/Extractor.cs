@@ -615,7 +615,13 @@ namespace AssetStudioMobile
 
             LogInfo($"read {LoadedFiles} serialized file(s), {LoadedObjects} object(s) total");
             Finish(report);
-            LogInfo(Stats.Report());
+            var summary = Stats.Report();
+            LogInfo(summary);
+
+            // Also to logcat. The UI log shows the last 14 lines and this report is longer than
+            // that, so measuring anything past the first few rows meant not being able to read the
+            // result at all.
+            AssetStudio.Logger.Info(summary);
             return report;
         }
 
@@ -831,7 +837,7 @@ namespace AssetStudioMobile
                             Stats.AddTexture(tex.m_TextureFormat.ToString(),
                                              Stopwatch.GetTimestamp() - t0,
                                              (long)tex.m_Width * tex.m_Height);
-                            WriteImage(image, dest, opt, opt.FlipTextures);
+                            WriteImage(image, dest, opt, opt.FlipTextures, FormatHasNoAlpha(tex.m_TextureFormat));
                         },
                     };
 
@@ -918,7 +924,33 @@ namespace AssetStudioMobile
             File.WriteAllText(dest, json, new UTF8Encoding(false));
         }
 
-        private static void WriteImage(Image image, string dest, ExportOptions options, bool flipDeferred = false)
+        /// <summary>
+        /// Formats with no alpha channel, so every pixel is opaque and the PNG can be written as RGB
+        /// -- a quarter less data into the deflate, and measurably more than a quarter faster.
+        ///
+        /// Deliberately conservative: naming a format here that does have alpha would silently drop
+        /// it, so anything ambiguous is left out and falls back to scanning the pixels instead. DXT1
+        /// is the obvious one, since it can carry 1-bit alpha.
+        /// </summary>
+        private static bool FormatHasNoAlpha(TextureFormat format) => format switch
+        {
+            TextureFormat.RGB24 => true,
+            TextureFormat.RGB565 => true,
+            TextureFormat.ETC_RGB4 => true,
+            TextureFormat.ETC_RGB4_3DS => true,
+            TextureFormat.ETC_RGB4Crunched => true,
+            TextureFormat.ETC2_RGB => true,
+            TextureFormat.ASTC_RGB_4x4 => true,
+            TextureFormat.ASTC_RGB_5x5 => true,
+            TextureFormat.ASTC_RGB_6x6 => true,
+            TextureFormat.ASTC_RGB_8x8 => true,
+            TextureFormat.ASTC_RGB_10x10 => true,
+            TextureFormat.ASTC_RGB_12x12 => true,
+            _ => false,
+        };
+
+        private static void WriteImage(Image image, string dest, ExportOptions options,
+                                       bool flipDeferred = false, bool assumeOpaque = false)
         {
             if (image == null)
                 throw new InvalidOperationException("texture decode returned no image (unsupported format?)");
@@ -932,7 +964,7 @@ namespace AssetStudioMobile
                 // Falls through on any failure, so a missing or broken library costs speed rather
                 // than the export.
                 if (options.ImageFormat == ImageFormat.Png && image is Image<Bgra32> bgra
-                    && RustPngNative.Available && RustPngNative.TryWrite(dest, bgra, flipDeferred))
+                    && RustPngNative.Available && RustPngNative.TryWrite(dest, bgra, flipDeferred, assumeOpaque))
                 {
                     Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
                     return;

@@ -21,7 +21,7 @@ namespace AssetStudioMobile
         [DllImport(Lib, EntryPoint = "rust_png_write_bgra", CallingConvention = CallingConvention.Cdecl)]
         private static extern unsafe int rust_png_write_bgra([MarshalAs(UnmanagedType.LPUTF8Str)] string path,
                                                              byte* bgra, int width, int height,
-                                                             int flipVertical);
+                                                             int flipVertical, int assumeOpaque);
 
         private static bool _probed;
         private static bool _available;
@@ -54,7 +54,7 @@ namespace AssetStudioMobile
         /// where the caller's flip went: doing it here is the same bytes moved, and doing it in
         /// managed code first measured 60.2s of CPU for 8487 textures.
         /// </summary>
-        public static unsafe bool TryWrite(string path, Image<Bgra32> image, bool flipVertical)
+        public static unsafe bool TryWrite(string path, Image<Bgra32> image, bool flipVertical, bool assumeOpaque)
         {
             var length = image.Width * 4 * image.Height;
             var bytes = BigArrayPool<byte>.Shared.Rent(length);
@@ -64,7 +64,7 @@ namespace AssetStudioMobile
                 fixed (byte* pixels = bytes)
                 {
                     return rust_png_write_bgra(path, pixels, image.Width, image.Height,
-                                               flipVertical ? 1 : 0) == 0;
+                                               flipVertical ? 1 : 0, assumeOpaque ? 1 : 0) == 0;
                 }
             }
             catch

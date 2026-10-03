@@ -1,11 +1,11 @@
 // Measures PNG encoding, and nothing else, so the only variable is the encoder.
 //
 //   dump  <png...>   decode each PNG to <png>.rgba + <png>.dims, for the C harness to read
-//   bench <png...>   time encoding it back, with fast settings matching the shipping encoder
+//   bench <png...>   time encoding it back, RGBA and RGB, with fast settings
 //
-// Run once plain and once with --features czlib. The difference between those runs is the deflate
-// implementation (pure-Rust miniz_oxide against C zlib); the difference between either and the C
-// harness is the language.
+// The RGB run exists because 92% of the textures in the test cache are ASTC_RGB_*, which carry no
+// alpha channel, and the export writes them as RGBA anyway. A quarter less data into the deflate
+// should be a quarter less time, and this is where that gets checked before anything is built on it.
 
 use std::fs;
 use std::time::Instant;
@@ -16,6 +16,17 @@ struct Sample {
     width: u32,
     height: u32,
     rgba: Vec<u8>,
+}
+
+/// The same pixels with the alpha byte dropped, built once outside the timer.
+fn to_rgb(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        out.push(px[0]);
+        out.push(px[1]);
+        out.push(px[2]);
+    }
+    out
 }
 
 fn decode(path: &str) -> Sample {
@@ -29,20 +40,16 @@ fn decode(path: &str) -> Sample {
     Sample { width: info.width, height: info.height, rgba: buf }
 }
 
-/// `settings` of None leaves the crate on its own defaults, which is the honest baseline for what
-/// Rust would do out of the box. Returns the encoded size in bytes.
-fn encode(s: &Sample, settings: Option<(Compression, FilterType)>) -> usize {
+fn encode(s: &Sample, color: ColorType, data: &[u8]) -> usize {
     let mut out = Vec::new();
     {
         let mut enc = Encoder::new(&mut out, s.width, s.height);
-        enc.set_color(ColorType::Rgba);
+        enc.set_color(color);
         enc.set_depth(BitDepth::Eight);
-        if let Some((compression, filter)) = settings {
-            enc.set_compression(compression);
-            enc.set_filter(filter);
-        }
+        enc.set_compression(Compression::Fast);
+        enc.set_filter(FilterType::Paeth);
         let mut w = enc.write_header().expect("header");
-        w.write_image_data(&s.rgba).expect("data");
+        w.write_image_data(data).expect("data");
         w.finish().expect("finish");
     }
     out.len()
@@ -79,29 +86,31 @@ fn main() {
             }
         }
         "bench" => {
-            let backend = if cfg!(feature = "czlib") { "C zlib" } else { "miniz_oxide (pure Rust)" };
+            let backend = if cfg!(feature = "czlib") { "C zlib" } else { "fdeflate via Compression::Fast" };
             println!("deflate backend: {backend}");
             for path in &args[1..] {
                 let s = decode(path);
+                let rgb = to_rgb(&s.rgba);
                 let iters = if (s.width as u64 * s.height as u64) > 2_000_000 { 3 } else { 10 };
 
-                let mut fast_size = 0usize;
-                let fast = time(iters, || {
-                    fast_size = encode(&s, Some((Compression::Fast, FilterType::Paeth)));
-                    fast_size
+                let mut rgba_size = 0usize;
+                let rgba = time(iters, || {
+                    rgba_size = encode(&s, ColorType::Rgba, &s.rgba);
+                    rgba_size
                 });
 
-                let mut def_size = 0usize;
-                let def = time(iters, || {
-                    def_size = encode(&s, None);
-                    def_size
+                let mut rgb_size = 0usize;
+                let rgb_ms = time(iters, || {
+                    rgb_size = encode(&s, ColorType::Rgb, &rgb);
+                    rgb_size
                 });
 
                 println!(
-                    "  {:38} {:>5}x{:<5} fast(Paeth,L1) {:7.1} ms {:>6} KB   crate default {:7.1} ms {:>6} KB",
+                    "  {:38} {:>5}x{:<5} RGBA {:7.1} ms {:>6} KB   RGB {:7.1} ms {:>6} KB   ({:.2}x)",
                     short(path), s.width, s.height,
-                    fast, fast_size / 1024,
-                    def, def_size / 1024
+                    rgba, rgba_size / 1024,
+                    rgb_ms, rgb_size / 1024,
+                    rgba / rgb_ms
                 );
             }
         }
