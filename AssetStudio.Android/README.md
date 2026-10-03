@@ -112,6 +112,24 @@ Four things that are easy to get wrong, all found by running it on a device:
 Also note the staging target must be the app's *external* directory: the shell cannot write into
 `/data/user/0/<pkg>`, which is the app's private sandbox.
 
+### The app has to show up in Shizuku's authorization list
+
+If it does not, the symptom is confusing: everything still works in ADB mode, because the
+service hands the binder over on first contact, but there is no way to *review or revoke*
+the grant from Shizuku's UI. What the list actually keys off is the Shizuku service's own
+record of which packages declare `rikka.shizuku.ShizukuProvider`, and that record is built
+when the service starts and from package add/update broadcasts it observes.
+
+So an app installed or upgraded afterwards can be missing from the list even though its
+provider is registered -- `dumpsys package providers` shows it, and the app still gets uid
+2000. Restarting the Shizuku service (or rebooting) makes it appear. Worth knowing before
+concluding the manifest is wrong, because the manifest really can be right.
+
+Note that Shizuku's own UI writes the adb starter to
+`/sdcard/Android/data/moe.shizuku.privileged.api/start.sh` only while that page is open; if
+you never open it, and the service is not running, there is no script on disk to start it
+with. The manager can also start itself over wireless debugging, which needs no script.
+
 Shizuku 13.x made `Shizuku.newProcess()` private, so this app goes through
 `IShizukuService.NewProcess` via `ShizukuBinderWrapper` instead. That interface's
 `waitForTimeout(long, String)` takes a `TimeUnit` *enum name* -- `"ms"` throws
