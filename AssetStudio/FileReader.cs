@@ -15,7 +15,11 @@ namespace AssetStudio
         private static readonly byte[] zipSpannedMagic = { 0x50, 0x4B, 0x07, 0x08 };
         private static readonly byte[] unityFsMagic = {0x55, 0x6E, 0x69, 0x74, 0x79, 0x46, 0x53, 0x00};
         private static readonly int headerBuffLen = 1152;
-        private static byte[] headerBuff = new byte[headerBuffLen];
+
+        // Per instance, not static: CheckFileType runs during construction, and a shared buffer
+        // means two threads loading at once corrupt each other's header check. It was the one piece
+        // of mutable static state on the load path.
+        private readonly byte[] headerBuff = new byte[headerBuffLen];
 
         public FileReader(string path) : this(path, File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) { }
 

@@ -174,6 +174,12 @@ namespace AssetStudioMobile
             var action = intent?.GetStringExtra("action");
             if (string.IsNullOrEmpty(action)) return;
 
+            // The type-tree reader round-trips every Texture2D/Material/AnimationClip through JSON
+            // (AssetStudio/TypeTreeHelper.cs:190). The GUI exposes the same tradeoff as a checkbox
+            // (AssetStudioGUIForm.cs:2545) and the CLI as --avoid-typetree; this makes it
+            // switchable from adb so the two can be measured on the same device.
+            if (intent.HasExtra("typetree")) Extractor.UseTypeTree = intent.GetBooleanExtra("typetree", true);
+
             switch (action.ToLowerInvariant())
             {
                 case "selftest":
@@ -221,6 +227,11 @@ namespace AssetStudioMobile
                         idx = Math.Max(0, Array.IndexOf(Enum.GetNames(typeof(ExportKind)), kindName));
                     }
                     if (intent.GetBooleanExtra("overwrite", false)) _overwrite.Checked = true;
+
+                    // Scan() reads the kind off the spinner to decide which object types to build,
+                    // so the spinner has to agree with what was asked for here.
+                    _kind.SetSelection(idx);
+
                     RunOnBackground(() =>
                     {
                         // Each `am start` is a fresh process, so an export launched this way has
@@ -396,7 +407,8 @@ namespace AssetStudioMobile
                 Progress = Report,
             };
 
-            _extractor.Load(_inputDir);
+            // The kind decides which object types are worth building; see Extractor.FilterFor.
+            _extractor.Load(_inputDir, (ExportKind)_kind.SelectedItemPosition);
             SetStatus($"{_extractor.LoadedFiles} file(s), {_extractor.LoadedObjects} object(s) loaded");
         }
 
@@ -407,6 +419,16 @@ namespace AssetStudioMobile
                 SetStatus("Scan first");
                 Append("Nothing loaded yet. Pick a folder or set a path and press Load.");
                 return;
+            }
+
+            // The load was filtered to one kind's types, so exporting something else has to go back
+            // through the loader. The filter only ever widens (SetAssetFilter unions), so it cannot
+            // be reset on a live AssetsManager -- Scan() builds a fresh one.
+            if (_extractor.LoadedKind != (ExportKind)kindIndex)
+            {
+                Append($"export kind changed to {(ExportKind)kindIndex}, reloading");
+                Scan();
+                if (_extractor == null) return;
             }
 
             var options = new ExportOptions
@@ -530,10 +552,43 @@ namespace AssetStudioMobile
 
     internal sealed class AndroidLogger : AssetStudio.ILogger
     {
+        /// <summary>
+        /// Debug is off. The loader emits one Debug line per decompressed block, and the 4.1 GB
+        /// cache is ~105k of them, all of it inside the loops it is reporting on: a string
+        /// interpolation, a main-thread post and a JNI call per block. Info and up are kept.
+        /// </summary>
+        public static bool Verbose;
+
+        /// <summary>
+        /// Warnings are capped. Loading the 4.1 GB cache fails on 6587 Material objects, and each
+        /// one logs a five-line header plus a full stack trace: ~250k lines of logcat and one JNI
+        /// call each, for a message that is the same every time.
+        /// </summary>
+        private const int WarningLimit = 200;
+
         private readonly MainActivity _activity;
+        private int _warnings;
+
         public AndroidLogger(MainActivity activity) => _activity = activity;
 
         public void Log(LoggerEvent loggerEvent, string message, bool ignoreLevel = false)
-            => _activity.RunOnUiThread(() => Android.Util.Log.Info("AssetStudio", $"[{loggerEvent}] {message}"));
+        {
+            if (loggerEvent < LoggerEvent.Info && !Verbose) return;
+
+            if (loggerEvent >= LoggerEvent.Warning)
+            {
+                var n = Interlocked.Increment(ref _warnings);
+                if (n > WarningLimit)
+                {
+                    if (n == WarningLimit + 1) Android.Util.Log.Info("AssetStudio", "[Warning] further warnings suppressed");
+                    return;
+                }
+            }
+
+            // Deliberately no RunOnUiThread: android.util.Log is thread safe, and routing every
+            // line through the main looper made it the bottleneck for work that runs on a
+            // background thread.
+            Android.Util.Log.Info("AssetStudio", $"[{loggerEvent}] {message}");
+        }
     }
 }

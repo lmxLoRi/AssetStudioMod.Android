@@ -3,6 +3,7 @@ using BundleCompression.Oodle;
 using System;
 using System.IO;
 using System.Text.RegularExpressions;
+using System.Threading;
 using K4os.Compression.LZ4;
 using ZstdSharp;
 
@@ -10,7 +11,11 @@ namespace AssetStudio
 {
     public static class BundleDecompressionHelper
     {
-        private static readonly Decompressor ZstdDecompressor = new Decompressor();
+        // Per thread, not shared: ZstdSharp's Decompressor keeps its working state in the
+        // instance, and batches are now decompressed by several workers at once.
+        [ThreadStatic] private static Decompressor _zstdDecompressor;
+
+        private static Decompressor ZstdDecompressor => _zstdDecompressor ??= new Decompressor();
         private static readonly string MsgPattern = @"\. ";
 
         public static MemoryStream DecompressLzmaStream(MemoryStream inStream)

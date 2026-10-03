@@ -94,12 +94,13 @@ namespace AssetStudioMobile
         private const int MaxReportedErrors = 100;
 
         /// <summary>
-        /// How many assets are decoded, encoded and written at once.
+        /// How many batches are loaded, encoded and written at once.
         ///
-        /// This is a memory budget as much as a CPU one: every asset in flight holds a decoded
-        /// image (4 MB for 1024x1024 Bgra32, 16 MB for 2048x2048) plus the encoder's buffers, on
-        /// top of the load batch that is already resident. Half the cores leaves the phone's big
-        /// cores for this and still gives most of the win.
+        /// One worker per batch: a batch is loaded once and then written, so the load of one
+        /// overlaps the encode of another. This is a memory budget as much as a CPU one -- every
+        /// worker holds its own batch of loaded objects, plus a decoded image (4 MB for 1024x1024
+        /// Bgra32, 16 MB for 2048x2048) per asset it is writing. Half the cores keeps the phone's
+        /// big cores busy without putting four heavy batches in memory at once.
         /// </summary>
         private static readonly int ExportThreads = Math.Max(2, Environment.ProcessorCount / 2);
 
@@ -123,12 +124,49 @@ namespace AssetStudioMobile
         private void LogWarn(string m) => Warn?.Invoke(m);
         private void Report(int cur, int total) => Progress?.Invoke(cur, total);
 
+        /// <summary>What the scan found. Plain counters, because a filtered or batched load keeps no objects.</summary>
+        public int LoadedFiles => _loadedFiles;
+        public int LoadedObjects => _loadedObjects;
+
+        // Backing fields, not auto-properties: the count pass adds to these from several workers.
+        private int _loadedFiles;
+        private int _loadedObjects;
+
+        /// <summary>The kind this instance was loaded for; see <see cref="FilterFor"/>.</summary>
+        public ExportKind LoadedKind { get; private set; }
+
         /// <summary>
-        /// What the scan found. These are plain counters rather than a live view of the loaded
-        /// objects, because in the batched case there are no loaded objects left to count.
+        /// AssetsManager.LoadViaTypeTree, which the GUI and CLI both expose.
+        ///
+        /// With it on, every Texture2D, Material, AnimationClip and Texture2DArray is read by
+        /// walking the file's type tree into an OrderedDictionary, serialising that to JSON and
+        /// deserialising it into the typed object (TypeTreeHelper.ReadTypeByteArray). Off, the same
+        /// objects are read straight from the stream by their field layout. Off is what non-type-tree
+        /// bundles always use, so it is a maintained path, but a type tree is what makes a mismatched
+        /// or newer class layout survive, which is why upstream defaults it on.
         /// </summary>
-        public int LoadedFiles { get; private set; }
-        public int LoadedObjects { get; private set; }
+        public static bool UseTypeTree = true;
+
+        /// <summary>
+        /// Which object types to materialise for an export kind.
+        ///
+        /// ReadAssets builds a C# object for every entry in every file's object table and holds it
+        /// until Clear(). On the 4.1 GB cache that is 1.66M objects; a Texture export reads 17766
+        /// of them, so 99% was deserialised, allocated and kept for nothing. The loader's filter
+        /// drops the rest before they are built -- ObjectReader does no IO, it only copies the
+        /// entry's metadata, so a filtered-out object costs nothing at all.
+        ///
+        /// Null means no filter. Auto, JsonDump and RawData can reach any type, and Auto's JSON
+        /// fallback matches everything, so there is nothing to filter by.
+        /// </summary>
+        private static ClassIDType[] FilterFor(ExportKind kind) => kind switch
+        {
+            ExportKind.Texture => new[] { ClassIDType.Texture2D },
+            ExportKind.Sprite => new[] { ClassIDType.Sprite },   // also pulls Texture2D + SpriteAtlas
+            ExportKind.Mesh => new[] { ClassIDType.Mesh },
+            ExportKind.TextAsset => new[] { ClassIDType.TextAsset },
+            _ => null,
+        };
 
         /// <summary>One scanned file, with the size the sniff already read.</summary>
         private readonly struct Candidate
@@ -143,10 +181,23 @@ namespace AssetStudioMobile
             }
         }
 
-        /// <summary>Recursively scans <paramref name="root"/> and loads every Unity file found.</summary>
-        public void Load(string root)
+        /// <summary>
+        /// Recursively scans <paramref name="root"/> and loads every Unity file found, keeping only
+        /// the object types <paramref name="kind"/> can export.
+        /// </summary>
+        public void Load(string root, ExportKind kind)
         {
             if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
+
+            LoadedKind = kind;
+            _assetsManager.LoadViaTypeTree = UseTypeTree;
+
+            var filter = FilterFor(kind);
+            if (filter != null)
+            {
+                _assetsManager.SetAssetFilter(filter);
+                LogInfo($"loading only {string.Join(", ", filter)} objects");
+            }
 
             var full = Path.GetFullPath(root);
             LogInfo($"Scanning {full}");
@@ -175,8 +226,8 @@ namespace AssetStudioMobile
 
             _candidates = candidates;
             _released = false;
-            LoadedFiles = 0;
-            LoadedObjects = 0;
+            _loadedFiles = 0;
+            _loadedObjects = 0;
 
             var batches = new List<(int Start, int Count)>(Batches(_candidates));
             if (batches.Count <= 1)
@@ -204,15 +255,28 @@ namespace AssetStudioMobile
             {
                 // Too big to hold. Read through it once so the counts are real, dropping each batch
                 // before opening the next; Export reads it again, one batch at a time.
-                LogInfo($"too large to hold in one go: reading {batches.Count} batches and releasing each");
+                //
+                // Across workers, because a batch is independent and one AssetsManager cannot load
+                // two of them. This is the same pass the export then repeats, so it is the most
+                // expensive thing in the app and the one worth spending cores on.
+                var list = _candidates;
+                LogInfo($"too large to hold in one go: reading {batches.Count} batches on {ExportThreads} thread(s)");
                 var done = 0;
-                foreach (var (start, count) in batches)
-                {
-                    LoadBatch(start, count);
-                    _assetsManager.Clear();
-                    done += count;
-                    Report(done, _candidates.Count);
-                }
+
+                Parallel.ForEach(batches,
+                    new ParallelOptions { MaxDegreeOfParallelism = ExportThreads },
+                    NewWorker,
+                    (batch, loopState, worker) =>
+                    {
+                        LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var f, out var o);
+                        Interlocked.Add(ref _loadedFiles, f);
+                        Interlocked.Add(ref _loadedObjects, o);
+                        worker.Manager.Clear();
+                        Report(Interlocked.Add(ref done, batch.Count), list.Count);
+                        return worker;
+                    },
+                    worker => worker.Dispose());
+
                 _released = true;
                 LogInfo($"Loaded {LoadedFiles} serialized file(s), {LoadedObjects} object(s) total");
             }
@@ -228,22 +292,50 @@ namespace AssetStudioMobile
         /// only place that decides how much is in memory at once.
         /// </summary>
         private void LoadBatch(int start, int count)
+            => LoadBatch(_assetsManager, _candidates, start, count, out _, out _);
+
+        /// <summary>
+        /// Loads one range of the scan into <paramref name="manager"/>.
+        ///
+        /// AssetsManager keeps everything it knows in the instance -- the file list, the seen-file
+        /// hashes, the PPtr index cache -- so the only way to have two batches in flight is to have
+        /// two of them. FileReader used to share one static header buffer, which made that a data
+        /// race; it does not any more.
+        /// </summary>
+        private static void LoadBatch(AssetsManager manager, List<Candidate> candidates, int start, int count,
+                                      out int files, out int objects)
         {
             // AssetsManager.LoadFilesAndFolders runs every entry through Path.GetFullPath, so it
             // needs absolute paths. Relative names would silently resolve against the process
             // working directory, which on Android is "/" and matches nothing.
             // (It also clears the list it is given, hence the local.)
             var paths = new List<string>(count);
-            for (var i = 0; i < count; i++) paths.Add(_candidates[start + i].Path);
+            for (var i = 0; i < count; i++) paths.Add(candidates[start + i].Path);
 
             // Dependencies are not a problem for batching: LoadAssetsFile queues the externals it
             // finds next to the file on disk into importFiles, and Load() drains that queue while
             // it grows, so a batch pulls in what it needs from the tree by name. A dependency
             // shared by many batches is simply loaded more than once.
-            _assetsManager.LoadFilesAndFolders(out var parent, paths);
-            _lastParent = parent;
-            LoadedFiles += _assetsManager.AssetsFileList.Count;
-            LoadedObjects += _assetsManager.AssetsFileList.Sum(f => f.Objects.Count);
+            manager.LoadFilesAndFolders(out _, paths);
+            files = manager.AssetsFileList.Count;
+            objects = manager.AssetsFileList.Sum(f => f.Objects.Count);
+        }
+
+        /// <summary>A loader of its own, so several batches can be in flight at once.</summary>
+        private Worker NewWorker()
+        {
+            var worker = new Worker();
+            worker.Manager.LoadViaTypeTree = UseTypeTree;
+
+            var filter = FilterFor(LoadedKind);
+            if (filter != null) worker.Manager.SetAssetFilter(filter);
+            return worker;
+        }
+
+        private sealed class Worker : IDisposable
+        {
+            public readonly AssetsManager Manager = new AssetsManager();
+            public void Dispose() => Manager.Clear();
         }
 
         /// <summary>
@@ -465,13 +557,15 @@ namespace AssetStudioMobile
             var report = new ExportReport();
             Directory.CreateDirectory(outputRoot);
 
+            var claimed = new ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
+
             if (!_released)
             {
                 // The tree fit one batch, so everything is still loaded and there is nothing to
                 // read again. Per-asset progress, because the asset count is the whole job.
-                var targets = CollectTargets(options);
+                var targets = CollectTargets(_assetsManager, options);
                 Report(0, targets.Count);
-                WriteTargets(targets, outputRoot, options, report, perAssetProgress: true);
+                Merge(report, WriteTargets(targets, outputRoot, options, true, claimed));
                 Finish(report);
                 return report;
             }
@@ -479,32 +573,43 @@ namespace AssetStudioMobile
             // Batched: read one batch in, export what it holds, drop it, next. Peak memory is one
             // batch however many bundles the tree has, which is the point -- a 4.1 GB cache exports
             // in the same footprint as a small one.
-            LogInfo($"exporting {_candidates.Count} file(s), at most {BatchFiles} or " +
-                    $"{BatchBytes / (1024 * 1024)} MB per batch");
+            var batches = new List<(int Start, int Count)>(Batches(_candidates));
+            LogInfo($"exporting {_candidates.Count} file(s) in {batches.Count} batches on {ExportThreads} thread(s) " +
+                    $"(at most {BatchFiles} files or {BatchBytes / (1024 * 1024)} MB each)");
+
+            var list = _candidates;
             var done = 0;
-            foreach (var (start, count) in Batches(_candidates))
-            {
-                LoadBatch(start, count);
-                // Progress is by file here, not by asset: the asset count is only known once the
-                // whole tree has been read, and the bar restarting for every batch would be worse
-                // than a coarse one.
-                WriteTargets(CollectTargets(options), outputRoot, options, report, perAssetProgress: false);
-                _assetsManager.Clear();
-                done += count;
-                Report(done, _candidates.Count);
-            }
+
+            // One worker per batch: it loads its own batch and writes it while the other workers do
+            // the same, so the load of one batch overlaps the encode of another. Progress is by file
+            // here -- the asset count is only known once the whole tree has been read.
+            Parallel.ForEach(batches,
+                new ParallelOptions { MaxDegreeOfParallelism = ExportThreads },
+                NewWorker,
+                (batch, loopState, worker) =>
+                {
+                    LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var _, out var _);
+                    var targets = CollectTargets(worker.Manager, options);
+                    var fragment = WriteTargets(targets, outputRoot, options, false, claimed);
+                    lock (report) Merge(report, fragment);
+                    worker.Manager.Clear();
+                    Report(Interlocked.Add(ref done, batch.Count), list.Count);
+                    return worker;
+                },
+                worker => worker.Dispose());
+
             Finish(report);
             return report;
         }
 
         /// <summary>Everything currently loaded that the requested kind covers.</summary>
-        private List<AssetStudio.Object> CollectTargets(ExportOptions options)
+        private static List<AssetStudio.Object> CollectTargets(AssetsManager manager, ExportOptions options)
         {
             // Auto takes everything and lets Plan() decide the format per asset, so a bundle only
             // exports as far as there is a real exporter for its types. The explicit kinds stay
             // available for exporting one category at a time.
             var targets = new List<AssetStudio.Object>();
-            foreach (var f in _assetsManager.AssetsFileList)
+            foreach (var f in manager.AssetsFileList)
             {
                 if (f?.Objects == null) continue;
                 foreach (var o in f.Objects)
@@ -524,120 +629,111 @@ namespace AssetStudioMobile
         /// per asset, and serially it left seven of the phone's eight cores idle while the PNG
         /// encoder saturated one (measured: 101% of a single core for the whole export).
         /// </summary>
-        private void WriteTargets(List<AssetStudio.Object> targets, string outputRoot, ExportOptions options,
-                                  ExportReport report, bool perAssetProgress)
+        /// <summary>
+        /// Writes one batch's assets and returns what happened to them.
+        ///
+        /// Serial on purpose: the parallelism is one level up, one worker per batch, because that
+        /// also lets one batch's load overlap another batch's writes. <paramref name="claimed"/> is
+        /// shared by every worker.
+        /// </summary>
+        private ExportReport WriteTargets(List<AssetStudio.Object> targets, string outputRoot,
+                                          ExportOptions options, bool perAssetProgress,
+                                          ConcurrentDictionary<string, bool> claimed)
         {
-            var tally = new Tally();
-            var byType = new Dictionary<string, int>(StringComparer.Ordinal);
-            var unexported = new Dictionary<string, int>(StringComparer.Ordinal);
-            var errors = new List<string>();
-
-            // Every thread tallies locally and the results are merged after the loop, so nothing in
-            // the hot path takes a lock. The one thing that genuinely needs one is the set of file
-            // names already spoken for.
-            var claimed = new ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
+            var report = new ExportReport { Matched = targets.Count };
 
             foreach (var g in targets.GroupBy(o => o.type.ToString()))
             {
-                byType[g.Key] = Get(byType, g.Key) + g.Count();
+                report.ByType[g.Key] = Get(report.ByType, g.Key) + g.Count();
             }
 
-            void Fail(AssetStudio.Object obj, Exception ex)
+            var done = 0;
+            foreach (var obj in targets)
             {
-                Interlocked.Increment(ref tally.Failed);
-                var msg = $"{DisplayName(obj)} ({obj.type}): {ex.GetType().Name}: {ex.Message}";
-
-                // Capped: a batch of assets sharing one failure mode can produce thousands of
-                // messages, and every one of them is a live string plus a UI post.
-                lock (errors)
+                ExportPlan plan;
+                try
                 {
-                    if (errors.Count >= MaxReportedErrors) return;
-                    errors.Add(msg);
+                    plan = Plan(obj, options);
                 }
-                LogWarn(msg);
-            }
-
-            Parallel.ForEach(targets,
-                new ParallelOptions { MaxDegreeOfParallelism = ExportThreads },
-                obj =>
+                catch (Exception ex)
                 {
-                    Interlocked.Increment(ref tally.Matched);
+                    Fail(report, obj, ex);
+                    if (perAssetProgress) Report(++done, targets.Count);
+                    continue;
+                }
 
-                    ExportPlan plan;
-                    try
-                    {
-                        plan = Plan(obj, options);
-                    }
-                    catch (Exception ex)
-                    {
-                        Fail(obj, ex);
-                        if (perAssetProgress) Report(Interlocked.Increment(ref tally.Done), targets.Count);
-                        return;
-                    }
+                if (plan == null)
+                {
+                    var typeName = obj.type.ToString();
+                    report.Unexported[typeName] = Get(report.Unexported, typeName) + 1;
+                }
+                else
+                {
+                    var dest = Path.Combine(outputRoot, DisplayName(obj) + plan.Extension);
 
-                    if (plan == null)
+                    // Two bundles can hold different assets with the same name and pathID, and one
+                    // file cannot hold both. The first claim wins: two workers writing the same path
+                    // would interleave into a corrupt file. An Addressables cache also keeps the same
+                    // asset in several bundles, so this is what stops it being encoded repeatedly.
+                    if (!claimed.TryAdd(dest, true))
                     {
-                        var typeName = obj.type.ToString();
-                        lock (unexported) unexported[typeName] = Get(unexported, typeName) + 1;
+                        report.Skipped++;
                     }
                     else
                     {
-                        var dest = Path.Combine(outputRoot, DisplayName(obj) + plan.Extension);
-
-                        // Two bundles can hold different assets with the same name and pathID. One
-                        // file cannot hold both, so the first claim wins: serially the last write
-                        // won by accident, and letting two threads write the same path at the same
-                        // time would interleave them into a corrupt file.
-                        if (!claimed.TryAdd(dest, true))
+                        try
                         {
-                            Interlocked.Increment(ref tally.Skipped);
+                            if (File.Exists(dest) && !options.Overwrite)
+                            {
+                                report.Skipped++;
+                            }
+                            else
+                            {
+                                plan.Write(obj, dest, options);
+                                report.Exported++;
+                            }
                         }
-                        else
+                        catch (Exception ex)
                         {
-                            try
-                            {
-                                if (File.Exists(dest) && !options.Overwrite)
-                                {
-                                    Interlocked.Increment(ref tally.Skipped);
-                                }
-                                else
-                                {
-                                    plan.Write(obj, dest, options);
-                                    Interlocked.Increment(ref tally.Exported);
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Fail(obj, ex);
-                            }
+                            Fail(report, obj, ex);
                         }
                     }
+                }
 
-                    if (perAssetProgress) Report(Interlocked.Increment(ref tally.Done), targets.Count);
-                });
-
-            report.Matched += tally.Matched;
-            report.Exported += tally.Exported;
-            report.Skipped += tally.Skipped;
-            report.Failed += tally.Failed;
-
-            foreach (var kv in byType) report.ByType[kv.Key] = Get(report.ByType, kv.Key) + kv.Value;
-            foreach (var kv in unexported) report.Unexported[kv.Key] = Get(report.Unexported, kv.Key) + kv.Value;
-
-            foreach (var e in errors)
-            {
-                if (report.Errors.Count >= MaxReportedErrors) break;
-                report.Errors.Add(e);
+                if (perAssetProgress) Report(++done, targets.Count);
             }
+
+            return report;
         }
 
-        private sealed class Tally
+        /// <summary>Records one asset that could not be planned or written.</summary>
+        private void Fail(ExportReport report, AssetStudio.Object obj, Exception ex)
         {
-            public int Matched;
-            public int Exported;
-            public int Skipped;
-            public int Failed;
-            public int Done;
+            report.Failed++;
+            var msg = $"{DisplayName(obj)} ({obj.type}): {ex.GetType().Name}: {ex.Message}";
+
+            // Capped: a batch of assets sharing one failure mode can produce thousands of messages,
+            // and every one of them is a live string.
+            if (report.Errors.Count < MaxReportedErrors) report.Errors.Add(msg);
+            LogWarn(msg);
+        }
+
+        /// <summary>Folds one batch's fragment into the run's report.</summary>
+        private static void Merge(ExportReport into, ExportReport from)
+        {
+            into.Matched += from.Matched;
+            into.Exported += from.Exported;
+            into.Skipped += from.Skipped;
+            into.Failed += from.Failed;
+
+            foreach (var kv in from.ByType) into.ByType[kv.Key] = Get(into.ByType, kv.Key) + kv.Value;
+            foreach (var kv in from.Unexported) into.Unexported[kv.Key] = Get(into.Unexported, kv.Key) + kv.Value;
+
+            foreach (var e in from.Errors)
+            {
+                if (into.Errors.Count >= MaxReportedErrors) break;
+                into.Errors.Add(e);
+            }
         }
 
         /// <summary>One summary for the whole run, rather than one per batch.</summary>
@@ -854,8 +950,8 @@ namespace AssetStudioMobile
             _assetsManager.Clear();
             _candidates = null;
             _released = false;
-            LoadedFiles = 0;
-            LoadedObjects = 0;
+            _loadedFiles = 0;
+            _loadedObjects = 0;
         }
 
         public void Dispose() => Clear();
