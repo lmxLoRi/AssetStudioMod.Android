@@ -153,6 +153,9 @@ namespace AssetStudioMobile
         /// <summary>The kind this instance was loaded for; see <see cref="FilterFor"/>.</summary>
         public ExportKind LoadedKind { get; private set; }
 
+        /// <summary>Where to write the phase report, so a measurement survives the run.</summary>
+        public string ReportPath;
+
         /// <summary>How many files the scan decided were Unity data.</summary>
         public int CandidateCount => _candidates?.Count ?? 0;
 
@@ -601,7 +604,10 @@ namespace AssetStudioMobile
                 NewWorker,
                 (batch, loopState, worker) =>
                 {
+                    var loadMark = Stopwatch.GetTimestamp();
                     LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var f, out var o, out _);
+                    Stats.AddPhase("export: load batch", Stopwatch.GetTimestamp() - loadMark);
+
                     Interlocked.Add(ref _loadedFiles, f);
                     Interlocked.Add(ref _loadedObjects, o);
                     var targets = CollectTargets(worker.Manager, options);
@@ -618,10 +624,15 @@ namespace AssetStudioMobile
             var summary = Stats.Report();
             LogInfo(summary);
 
-            // Also to logcat. The UI log shows the last 14 lines and this report is longer than
-            // that, so measuring anything past the first few rows meant not being able to read the
-            // result at all.
-            AssetStudio.Logger.Info(summary);
+            // Also to a file. The UI log shows the last 14 lines, and logcat is not usable on this
+            // device either -- the system's own GPU spam rolls the 256 KB buffer over before a five
+            // minute export finishes, and the report comes back empty. A file is the only place a
+            // measurement reliably survives to be read.
+            if (!string.IsNullOrEmpty(ReportPath))
+            {
+                try { File.WriteAllText(ReportPath, summary); }
+                catch (Exception ex) { LogWarn($"could not write the report: {ex.Message}"); }
+            }
             return report;
         }
 

@@ -578,6 +578,8 @@ namespace AssetStudioMobile
                 Info = Append,
                 Warn = Append,
                 Progress = Report,
+                ReportPath = Path.Combine(GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath,
+                                          "last-report.txt"),
             };
 
             // The kind decides which object types are worth building; see Extractor.FilterFor.
