@@ -13,10 +13,14 @@ OUT="$HERE/../../AssetStudio.Android/jniLibs"
 
 [ -x "$BIN/aarch64-linux-android${API}-clang" ] || { echo "no NDK at $NDK" >&2; exit 1; }
 
-CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$BIN/aarch64-linux-android${API}-clang" \
-RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384" \
-    cargo build --release --manifest-path "$HERE/Cargo.toml" --target aarch64-linux-android
+RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
 
-mkdir -p "$OUT/arm64-v8a"
-cp "$HERE/target/aarch64-linux-android/release/libRustPng.so" "$OUT/arm64-v8a/"
-echo "built $OUT/arm64-v8a/libRustPng.so"
+for pair in "aarch64-linux-android:arm64-v8a" "x86_64-linux-android:x86_64"; do
+    triple=${pair%%:*}; abi=${pair##*:}
+    env "CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER=$BIN/${triple}${API}-clang" \
+        RUSTFLAGS="$RUSTFLAGS" \
+        cargo build --release --manifest-path "$HERE/Cargo.toml" --target "$triple"
+    mkdir -p "$OUT/$abi"
+    cp "$HERE/target/$triple/release/libRustPng.so" "$OUT/$abi/"
+    echo "built $OUT/$abi/libRustPng.so"
+done

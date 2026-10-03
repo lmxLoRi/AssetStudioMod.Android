@@ -108,9 +108,6 @@ namespace AssetStudioMobile
         /// </summary>
         private const long BatchBytes = 32L * 1024 * 1024;
 
-        /// <summary>zlib level for the native PNG writer; 1 is the speed setting.</summary>
-        public static int PngLevel = 1;
-
         /// <summary>How many failure messages an export keeps, so one bad batch cannot fill memory.</summary>
         private const int MaxReportedErrors = 100;
 
@@ -915,22 +912,15 @@ namespace AssetStudioMobile
             {
                 var t0 = Stopwatch.GetTimestamp();
 
-                // Rust first, then the C encoder, then ImageSharp: all three write the same PNG,
-                // and they are ordered by what each one's deflate measured. Falls through on any
-                // failure, so a missing or broken library costs speed rather than the export.
-                if (options.ImageFormat == ImageFormat.Png && image is Image<Bgra32> bgra)
+                // Rust first, ImageSharp second: both write the same PNG, and they are ordered by
+                // what each one's deflate measured (205s against 931s of CPU for 8487 textures).
+                // Falls through on any failure, so a missing or broken library costs speed rather
+                // than the export.
+                if (options.ImageFormat == ImageFormat.Png && image is Image<Bgra32> bgra
+                    && RustPngNative.Available && RustPngNative.TryWrite(dest, bgra))
                 {
-                    if (RustPngNative.Available && RustPngNative.TryWrite(dest, bgra))
-                    {
-                        Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
-                        return;
-                    }
-
-                    if (PngNative.Available && PngNative.TryWrite(dest, bgra, PngLevel))
-                    {
-                        Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
-                        return;
-                    }
+                    Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
+                    return;
                 }
 
                 using (var fs = File.Create(dest))
