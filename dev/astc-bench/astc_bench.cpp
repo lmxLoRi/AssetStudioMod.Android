@@ -29,10 +29,15 @@ static void run(const char *label, int w, int h, int bw, int bh)
     uint8_t *data = (uint8_t *)malloc(bytes);
     uint32_t *out = (uint32_t *)malloc((size_t)blocks_x * bw * blocks_y * bh * 4);
 
-    // Random blocks rather than a captured texture: every mode and every bit pattern has to decode,
-    // which makes this pessimistic rather than flattering. Noted because it is not a real mix.
-    srand(1234);
-    for (long i = 0; i < bytes; i++) data[i] = (uint8_t)(rand() & 0xff);
+    // Reads the same file the Rust harness reads, so both decode identical bytes. ASTC decode time
+    // depends on which block modes the data uses, and two different random number generators would
+    // not be the same work. Written by `t2d-bench gen`.
+    char path[256];
+    snprintf(path, sizeof path, "/tmp/astc-input-%d-%d-%dx%d.bin", w, h, bw, bh);
+    FILE *f = fopen(path, "rb");
+    if (!f) { printf("  missing %s -- run `t2d-bench gen` first\n", path); free(data); free(out); return; }
+    if (fread(data, 1, (size_t)bytes, f) != (size_t)bytes) { printf("  short read %s\n", path); fclose(f); free(data); free(out); return; }
+    fclose(f);
 
     for (int i = 0; i < 3; i++) decode_astc(data, w, h, bw, bh, out);
 
@@ -41,10 +46,15 @@ static void run(const char *label, int w, int h, int bw, int bh)
     for (int i = 0; i < iters; i++) decode_astc(data, w, h, bw, bh, out);
     double ms = (now_ms() - t0) / iters;
 
+    // Checksum of the whole output: a speed comparison is only meaningful if both decoders are
+    // producing the same image, not just running the same amount of code.
+    unsigned long long sum = 0;
+    for (long i = 0; i < (long)blocks_x * bw * blocks_y * bh; i++) sum = sum * 131 + out[i];
+
     double mpix = (double)w * h / 1e6;
-    printf("  %-14s %4dx%-5d %6.2f ms   %7.1f MPix/s   %6.1f Mblocks/s   (out[0]=0x%08x)\n",
+    printf("  %-14s %4dx%-5d %6.2f ms   %7.1f MPix/s   %6.1f Mblocks/s   (checksum=0x%016llx)\n",
            label, w, h, ms, mpix / (ms / 1000.0),
-           (double)(w / bw) * (h / bh) / (ms / 1000.0) / 1e6, out[0]);
+           (double)(w / bw) * (h / bh) / (ms / 1000.0) / 1e6, sum);
 
     free(data);
     free(out);
@@ -53,9 +63,9 @@ static void run(const char *label, int w, int h, int bw, int bh)
 int main(void)
 {
     printf("decode_astc standalone, desktop %s\n", sizeof(void *) == 8 ? "x86_64" : "32-bit");
-    run("ASTC 4x4", 1024, 1024, 4, 4);
-    run("ASTC 6x6", 1020, 1020, 6, 6);
-    run("ASTC 8x8", 1024, 1024, 8, 8);
-    run("ASTC 4x4 big", 2048, 2048, 4, 4);
+    // Real ASTC payloads, 512x512, the same bytes the Rust harness reads.
+    run("ASTC 4x4", 512, 512, 4, 4);
+    run("ASTC 6x6", 512, 512, 6, 6);
+    run("ASTC 8x8", 512, 512, 8, 8);
     return 0;
 }
