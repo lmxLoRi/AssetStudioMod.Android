@@ -80,12 +80,42 @@ press **Load**.
 Two limitations worth knowing:
 
 - **It does not reach other apps' app-specific directories.** The platform documentation is
-  explicit: `/sdcard/Android/data/<other package>/` stays inaccessible. Unity games keep their
-  data exactly there, so bundles that are still inside a game's own directory cannot be read this
-  way. Copy them out first, or use the SAF path.
+  explicit: `/sdcard/Android/data/<other package>/` stays inaccessible. Use the Shizuku path
+  above for those, or copy them out yourself.
 - **Google Play does not permit this permission for asset-extraction apps.** It requires a
   Permissions Declaration Form and an approved use case, and extraction is not one. Fine for
   sideloading; the SAF path keeps the app policy-clean if that ever matters.
+
+### Shizuku (the only thing that reaches Android/data)
+
+`/sdcard/Android/data/<game>` is unreachable both ways above, and Shizuku is what fixes it. Its
+service runs as uid 2000 (shell), which has `ext_data_rw` and therefore can read those paths.
+The app declares Shizuku's provider and, when a path cannot be read directly, falls back to
+staging it through a shell-side `cp -r` into its own external directory, then loads it normally.
+
+Shizuku is still not a privilege escalation of our own process, so this is a copy -- but it is
+fully automatic, with no folder picking, which is the part that matters for multi-gigabyte sets.
+
+Four things that are easy to get wrong, all found by running it on a device:
+
+1. **The provider must be declared by the app.** Shizuku's `provider` AAR only contributes a
+   permission and a meta-data tag.
+2. **`android:permission` must be `android.permission.INTERACT_ACROSS_USERS_FULL`**, not
+   Shizuku's `moe.shizuku.manager.permission.API_V23`. The service runs as shell in ADB mode and
+   cannot hold a signature permission, so with API_V23 every hand-off is refused
+   (`Permission Denial ... requires API_V23`) and `PingBinder()` stays false forever.
+3. **`android:multiprocess` must be `false`** or `ShizukuProvider.attachInfo` throws
+   `IllegalStateException` during app start.
+4. **`<queries>` must list `moe.shizuku.privileged.api`**, otherwise package visibility hides the
+   manager and the app never shows up in Shizuku's authorization list.
+
+Also note the staging target must be the app's *external* directory: the shell cannot write into
+`/data/user/0/<pkg>`, which is the app's private sandbox.
+
+Shizuku 13.x made `Shizuku.newProcess()` private, so this app goes through
+`IShizukuService.NewProcess` via `ShizukuBinderWrapper` instead. That interface's
+`waitForTimeout(long, String)` takes a `TimeUnit` *enum name* -- `"ms"` throws
+`IllegalArgumentException: No enum constant java.util.concurrent.TimeUnit.ms`.
 
 ### Storage Access Framework (fallback, no permission)
 

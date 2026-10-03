@@ -24,6 +24,7 @@ namespace AssetStudioMobile
         private ProgressBar _bar;
         private Button _btnImport;
         private Button _btnGrant;
+        private Button _btnShizuku;
         private TextView _permStatus;
         private EditText _inputPath;
         private EditText _outputPath;
@@ -77,6 +78,10 @@ namespace AssetStudioMobile
         private View BuildUi()
         {
             var root = new LinearLayout(this) { Orientation = Orientation.Vertical };
+
+            _btnShizuku = new Button(this) { Text = "Shizuku: request permission" };
+            _btnShizuku.Click += (_, __) => ShizukuBridge.RequestPermission();
+            root.AddView(_btnShizuku);
 
             _btnGrant = new Button(this) { Text = "Grant all-files access" };
             _btnGrant.Click += (_, __) => RequestAllFilesAccess();
@@ -239,9 +244,16 @@ namespace AssetStudioMobile
             if (_permStatus == null || _btnGrant == null) return;
             var granted = StorageAccess.HasAllFilesAccess();
             _btnGrant.Visibility = granted ? ViewStates.Gone : ViewStates.Visible;
-            _permStatus.Text = granted
-                ? "all-files access: GRANTED (read/write any path)"
-                : "all-files access: not granted. You can still pick a folder, but files will be copied.";
+
+            var shizuku = ShizukuBridge.State;
+            _btnShizuku.Visibility = shizuku == ShizukuState.Ready ? ViewStates.Gone : ViewStates.Visible;
+            _permStatus.Text = (granted
+                    ? "all-files access: GRANTED (read/write any path)"
+                    : "all-files access: not granted. SAF still works but copies files.") +
+                "\n" + ShizukuBridge.Describe() +
+                (shizuku == ShizukuState.Ready
+                    ? "\nneeded for /sdcard/Android/data"
+                    : "");
         }
 
         private void RequestAllFilesAccess()
@@ -260,17 +272,47 @@ namespace AssetStudioMobile
         private void LoadFromPathField()
         {
             var typed = _inputPath.Text;
-            var problem = StorageAccess.ValidateReadableDirectory(typed);
-            if (problem != null)
+            if (string.IsNullOrWhiteSpace(typed))
             {
-                Append($"ERROR: {typed}: {problem}");
-                SetStatus(problem);
+                Append("ERROR: no path given");
                 return;
             }
 
-            _inputDir = Path.GetFullPath(typed.Trim());
-            _inputPath.Text = _inputDir;
-            RunOnBackground(Scan);
+            RunOnBackground(() =>
+            {
+                var full = typed.Trim();
+                try { full = Path.GetFullPath(full); } catch { /* keep the raw text for the error */ }
+
+                var problem = StorageAccess.ValidateReadableDirectory(full);
+                if (problem == null)
+                {
+                    _inputDir = full;
+                    RunOnUiThread(() => _inputPath.Text = full);
+                    Scan();
+                    return;
+                }
+
+                Append($"{full}: {problem}");
+                Append("all-files access does not cover /sdcard/Android/data; trying Shizuku...");
+
+                if (ShizukuBridge.State != ShizukuState.Ready)
+                {
+                    Append($"ERROR: cannot read it, and Shizuku is not usable ({ShizukuBridge.State}). " +
+                           "Copy the game's files to /sdcard/Download first.");
+                    SetStatus("cannot read, and Shizuku unavailable");
+                    return;
+                }
+
+                // Stage into our own EXTERNAL app dir, not FilesDir: the Shizuku service runs as
+                // uid 2000 and cannot write into /data/user/0/<pkg>, which is the app's private
+                // sandbox. The external dir is writable by shell (ext_data_rw) and by us.
+                var externalRoot = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
+                var staging = Path.Combine(externalRoot, "staged");
+                var staged = ShizukuBridge.StageDirectory(full, staging, Append, (c, t) => Report(c, t));
+                _inputDir = staged;
+                RunOnUiThread(() => _inputPath.Text = staged);
+                Scan();
+            });
         }
 
         // ---------------- SAF import ----------------
@@ -298,6 +340,9 @@ namespace AssetStudioMobile
 
             // If all-files access is held we can usually map the tree back to a real path and read
             // it in place, which avoids copying potentially gigabytes of bundles.
+            var docId = DocumentsContract.GetTreeDocumentId(uri);
+            Append($"picked: {uri} (docId='{docId}')");
+
             var direct = StorageAccess.TryResolveTreePath(this, uri);
             if (direct != null)
             {

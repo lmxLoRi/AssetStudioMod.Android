@@ -1,10 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!-- Android 11+ package visibility. Without these the Shizuku provider cannot resolve the
+       manager package, so it never hands the binder over, PingBinder() stays false, and the app
+       never shows up in Shizuku's authorization list. -->
+  <queries>
+    <package android:name="moe.shizuku.privileged.api" />
+    <package android:name="rikka.shizuku" />
+    <package android:name="moe.shizuku.privileged.api.starter" />
+  </queries>
+
   <application android:allowBackup="true"
                android:icon="@mipmap/appicon"
                android:label="@string/app_name"
                android:roundIcon="@mipmap/appicon_round"
-               android:supportsRtl="true" />
+               android:supportsRtl="true">
+
+    <!-- Shizuku's provider AAR only contributes a permission and a meta-data tag; the provider
+         itself must be declared by the app.
+
+         The required permission must be INTERACT_ACROSS_USERS_FULL, not Shizuku's own
+         moe.shizuku.manager.permission.API_V23: the Shizuku service runs as uid 2000 (shell) in
+         ADB mode and cannot hold a signature permission, so with API_V23 every binder hand-off is
+         refused with "Permission Denial ... requires API_V23" and PingBinder() stays false.
+
+         multiprocess must also be false or ShizukuProvider.attachInfo throws at startup. -->
+    <provider
+        android:name="rikka.shizuku.ShizukuProvider"
+        android:authorities="${applicationId}.shizuku"
+        android:enabled="true"
+        android:exported="true"
+        android:multiprocess="false"
+        android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+  </application>
 
   <!-- Optional. Unlocks reading and writing any real filesystem path directly, with no copying.
        The user has to grant it manually in Settings, and Google Play does not permit it for asset

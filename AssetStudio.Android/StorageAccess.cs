@@ -140,10 +140,28 @@ namespace AssetStudioMobile
             }
             catch (Exception ex)
             {
+                // Android/data is the case worth explaining: both SAF and all-files access are
+                // documented as unable to reach it, so a bare "permission denied" sends people
+                // hunting for a toggle that does not exist.
+                if (IsAndroidDataPath(full))
+                {
+                    return "permission denied: /sdcard/Android/data is out of reach for this app. " +
+                           "MANAGE_EXTERNAL_STORAGE does not cover other apps' app-specific dirs, and " +
+                           "ACTION_OPEN_DOCUMENT_TREE cannot select Android/data on Android 11+. " +
+                           "Use Shizuku, or copy the game's files somewhere under /sdcard/Download first";
+                }
                 return $"cannot read: {ex.Message}";
             }
 
             return null;
+        }
+
+        /// <summary>True for /sdcard/Android/data and /sdcard/Android/obb, at any depth.</summary>
+        internal static bool IsAndroidDataPath(string path)
+        {
+            var p = path.Replace('\\', '/');
+            return p.Contains("/Android/data/") || p.EndsWith("/Android/data", StringComparison.Ordinal)
+                || p.Contains("/Android/obb/") || p.EndsWith("/Android/obb", StringComparison.Ordinal);
         }
 
         private static bool IsUnderAppExternal(string path)

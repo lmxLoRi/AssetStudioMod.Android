@@ -23,6 +23,16 @@
     <AndroidEnableProfiledAot>false</AndroidEnableProfiledAot>
   </PropertyGroup>
 
+  <!-- Shizuku lets the app run shell-level commands (uid 2000), which is what reaches
+       /sdcard/Android/data: neither SAF nor MANAGE_EXTERNAL_STORAGE can. Shizuku 13.x made
+       Shizuku.newProcess() private, so the binder interface (IShizukuService.NewProcess) is
+       used directly through ShizukuBinderWrapper instead. -->
+  <ItemGroup>
+    <AndroidLibrary Include="libs/api-13.1.5.aar" Bind="true" />
+    <AndroidLibrary Include="libs/aidl-13.1.5.aar" Bind="true" />
+    <AndroidLibrary Include="libs/provider-13.1.5.aar" Bind="true" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\AssetStudio\AssetStudio.csproj" />
     <ProjectReference Include="..\AssetStudioUtility\AssetStudioUtility.csproj" />
