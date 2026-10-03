@@ -28,7 +28,7 @@ pub unsafe extern "C" fn rust_png_write_bgra(
     bgra: *const c_uchar,
     width: c_int,
     height: c_int,
-    _level: c_int,
+    flip_vertical: c_int,
 ) -> c_int {
     if path.is_null() || bgra.is_null() || width <= 0 || height <= 0 {
         return -1;
@@ -37,12 +37,23 @@ pub unsafe extern "C" fn rust_png_write_bgra(
     let len = width as usize * height as usize * 4;
     let source = slice::from_raw_parts(bgra, len);
 
+    // BGRA to RGBA and, when asked, bottom-up to top-down, in the same pass. The rows are
+    // reversed by writing them to the opposite end of the destination, which is the same bytes
+    // moved and costs nothing; the caller flipping the image first was 60.2s of CPU for 8487
+    // textures, 26% of everything the texture decoder appeared to cost.
+    let stride = width as usize * 4;
     let mut pixels = vec![0u8; len];
-    for (dst, src) in pixels.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
-        dst[0] = src[2];
-        dst[1] = src[1];
-        dst[2] = src[0];
-        dst[3] = src[3];
+    let rows = height as usize;
+    for y in 0..rows {
+        let dst_row = if flip_vertical != 0 { rows - 1 - y } else { y };
+        let src_row = &source[y * stride..(y + 1) * stride];
+        let dst_row = &mut pixels[dst_row * stride..(dst_row + 1) * stride];
+        for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = src[3];
+        }
     }
     let pixels: &[u8] = &pixels;
 

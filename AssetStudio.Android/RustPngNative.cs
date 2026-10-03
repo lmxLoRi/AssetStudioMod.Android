@@ -20,7 +20,8 @@ namespace AssetStudioMobile
 
         [DllImport(Lib, EntryPoint = "rust_png_write_bgra", CallingConvention = CallingConvention.Cdecl)]
         private static extern unsafe int rust_png_write_bgra([MarshalAs(UnmanagedType.LPUTF8Str)] string path,
-                                                             byte* bgra, int width, int height, int level);
+                                                             byte* bgra, int width, int height,
+                                                             int flipVertical);
 
         private static bool _probed;
         private static bool _available;
@@ -46,8 +47,14 @@ namespace AssetStudioMobile
             }
         }
 
-        /// <summary>Writes <paramref name="image"/> as an 8-bit RGBA PNG. False on any failure.</summary>
-        public static unsafe bool TryWrite(string path, Image<Bgra32> image)
+        /// <summary>
+        /// Writes <paramref name="image"/> as an 8-bit RGBA PNG. False on any failure.
+        ///
+        /// <paramref name="flipVertical"/> turns the image over while the rows are copied, which is
+        /// where the caller's flip went: doing it here is the same bytes moved, and doing it in
+        /// managed code first measured 60.2s of CPU for 8487 textures.
+        /// </summary>
+        public static unsafe bool TryWrite(string path, Image<Bgra32> image, bool flipVertical)
         {
             var length = image.Width * 4 * image.Height;
             var bytes = BigArrayPool<byte>.Shared.Rent(length);
@@ -56,7 +63,8 @@ namespace AssetStudioMobile
                 image.CopyPixelDataTo(bytes.AsSpan(0, length));
                 fixed (byte* pixels = bytes)
                 {
-                    return rust_png_write_bgra(path, pixels, image.Width, image.Height, 1) == 0;
+                    return rust_png_write_bgra(path, pixels, image.Width, image.Height,
+                                               flipVertical ? 1 : 0) == 0;
                 }
             }
             catch

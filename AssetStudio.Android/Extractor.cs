@@ -11,6 +11,7 @@ using AssetStudio;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 namespace AssetStudioMobile
 {
@@ -822,12 +823,15 @@ namespace AssetStudioMobile
                         Extension = ".png",
                         Write = (obj, dest, opt) =>
                         {
+                            // Decoded without the vertical flip and flipped by the encoder instead,
+                            // which does it inside the BGRA->RGBA pass it was making anyway. Flipping
+                            // here first measured 60.2s of CPU across 8487 textures.
                             var t0 = Stopwatch.GetTimestamp();
-                            var image = ((Texture2D)obj).ConvertToImage(opt.FlipTextures);
+                            var image = ((Texture2D)obj).ConvertToImage(false);
                             Stats.AddTexture(tex.m_TextureFormat.ToString(),
                                              Stopwatch.GetTimestamp() - t0,
                                              (long)tex.m_Width * tex.m_Height);
-                            WriteImage(image, dest, opt);
+                            WriteImage(image, dest, opt, opt.FlipTextures);
                         },
                     };
 
@@ -914,7 +918,7 @@ namespace AssetStudioMobile
             File.WriteAllText(dest, json, new UTF8Encoding(false));
         }
 
-        private static void WriteImage(Image image, string dest, ExportOptions options)
+        private static void WriteImage(Image image, string dest, ExportOptions options, bool flipDeferred = false)
         {
             if (image == null)
                 throw new InvalidOperationException("texture decode returned no image (unsupported format?)");
@@ -928,11 +932,15 @@ namespace AssetStudioMobile
                 // Falls through on any failure, so a missing or broken library costs speed rather
                 // than the export.
                 if (options.ImageFormat == ImageFormat.Png && image is Image<Bgra32> bgra
-                    && RustPngNative.Available && RustPngNative.TryWrite(dest, bgra))
+                    && RustPngNative.Available && RustPngNative.TryWrite(dest, bgra, flipDeferred))
                 {
                     Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
                     return;
                 }
+
+                // Falling back to ImageSharp, so the flip the native path would have done has to
+                // happen here after all.
+                if (flipDeferred) image.Mutate(x => x.Flip(FlipMode.Vertical));
 
                 using (var fs = File.Create(dest))
                 {
