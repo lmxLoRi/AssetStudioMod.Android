@@ -397,7 +397,7 @@ namespace AssetStudioMobile
             };
 
             _extractor.Load(_inputDir);
-            SetStatus($"{_extractor.Files.Count()} file(s), {_extractor.CountAssets()} object(s) loaded");
+            SetStatus($"{_extractor.LoadedFiles} file(s), {_extractor.LoadedObjects} object(s) loaded");
         }
 
         private void Export(int kindIndex, bool overwrite)

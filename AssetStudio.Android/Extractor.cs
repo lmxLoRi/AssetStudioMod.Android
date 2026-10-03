@@ -71,6 +71,36 @@ namespace AssetStudioMobile
     /// </summary>
     public sealed class Extractor : IDisposable
     {
+        /// <summary>
+        /// How much one AssetsManager.LoadFilesAndFolders call may bring in.
+        ///
+        /// The loader reads every object of every file it is handed and keeps all of them alive
+        /// until Clear(), so the size of that one call is the app's peak memory. Handing it a whole
+        /// game directory is what killed the process on the 4.1 GB / 4901-bundle Addressables cache
+        /// at /sdcard/Android/data/com.pinkcore.starlusts: it read ~4900 bundles into memory in one
+        /// go and was gone before the load finished. Whichever budget is reached first closes a
+        /// batch, so a few huge bundles are bounded as well as many small ones.
+        ///
+        /// These are input bytes, not the memory the objects take, which is the decompressed size
+        /// and can be several times larger. Both are deliberately well under what the device has
+        /// (the 4.1 GB cache becomes ~64 batches and ~64 MB in flight at a time).
+        /// </summary>
+        private const int BatchFiles = 128;
+        private const long BatchBytes = 64L * 1024 * 1024;
+
+        /// <summary>How many failure messages an export keeps, so one bad batch cannot fill memory.</summary>
+        private const int MaxReportedErrors = 100;
+
+        /// <summary>Every file the scan decided was Unity data, in path order.</summary>
+        private List<Candidate> _candidates;
+
+        /// <summary>
+        /// True when the load was batched and the objects were released again, so Export has to
+        /// read the tree a second time. False means it all fit one batch and is still in
+        /// <see cref="_assetsManager"/>.
+        /// </summary>
+        private bool _released;
+
         private readonly AssetsManager _assetsManager = new AssetsManager();
 
         public Action<string> Info;
@@ -81,9 +111,25 @@ namespace AssetStudioMobile
         private void LogWarn(string m) => Warn?.Invoke(m);
         private void Report(int cur, int total) => Progress?.Invoke(cur, total);
 
-        public IEnumerable<SerializedFile> Files => _assetsManager.AssetsFileList;
+        /// <summary>
+        /// What the scan found. These are plain counters rather than a live view of the loaded
+        /// objects, because in the batched case there are no loaded objects left to count.
+        /// </summary>
+        public int LoadedFiles { get; private set; }
+        public int LoadedObjects { get; private set; }
 
-        public int CountAssets() => _assetsManager.AssetsFileList.Sum(f => f.Objects.Count);
+        /// <summary>One scanned file, with the size the sniff already read.</summary>
+        private readonly struct Candidate
+        {
+            public readonly string Path;
+            public readonly long Length;
+
+            public Candidate(string path, long length)
+            {
+                Path = path;
+                Length = length;
+            }
+        }
 
         /// <summary>Recursively scans <paramref name="root"/> and loads every Unity file found.</summary>
         public void Load(string root)
@@ -115,29 +161,104 @@ namespace AssetStudioMobile
                     $"(walk {walkMs} ms, sniff {sniffMs} ms, dropped {everything.Length - candidates.Count})");
             Report(0, candidates.Count);
 
-            // The loader reports per-file progress through this hook, and nothing else reports
-            // during a load. Without it, a directory this size just looks frozen.
-            // Fully qualified: this class has its own Progress field, which would otherwise win.
-            var previous = AssetStudio.Progress.Default;
-            AssetStudio.Progress.Default = new InlineProgress<int>(pct => Report(pct, 100));
-            try
+            _candidates = candidates;
+            _released = false;
+            LoadedFiles = 0;
+            LoadedObjects = 0;
+
+            var batches = new List<(int Start, int Count)>(Batches(_candidates));
+            if (batches.Count <= 1)
             {
-                // AssetsManager.LoadFilesAndFolders runs every entry through Path.GetFullPath, so it
-                // needs absolute paths. Relative names would silently resolve against the process
-                // working directory, which on Android is "/" and matches nothing.
-                // (It also clears the list it is given, hence the local.)
-                var paths = new List<string>(candidates);
-                _assetsManager.LoadFilesAndFolders(out var actualParent, paths);
-                LogInfo($"Loaded {_assetsManager.AssetsFileList.Count} serialized file(s), " +
-                        $"{CountAssets()} object(s) from {actualParent}");
+                // Small enough to hold, so hold it: Export then works straight out of memory
+                // instead of reading the tree a second time.
+                //
+                // The loader reports per-file progress through this hook and nothing else reports
+                // during a load, so without it a load just looks frozen. Only wired here: the hook
+                // reports a percentage of one call, which would restart from 0 for every batch.
+                // Fully qualified: this class has its own Progress field, which would otherwise win.
+                var previous = AssetStudio.Progress.Default;
+                AssetStudio.Progress.Default = new InlineProgress<int>(pct => Report(pct, 100));
+                try
+                {
+                    LoadBatch(0, _candidates.Count);
+                }
+                finally
+                {
+                    AssetStudio.Progress.Default = previous;
+                }
+                LogInfo($"Loaded {LoadedFiles} serialized file(s), {LoadedObjects} object(s) from {_lastParent}");
             }
-            finally
+            else
             {
-                AssetStudio.Progress.Default = previous;
+                // Too big to hold. Read through it once so the counts are real, dropping each batch
+                // before opening the next; Export reads it again, one batch at a time.
+                LogInfo($"too large to hold in one go: reading {batches.Count} batches and releasing each");
+                var done = 0;
+                foreach (var (start, count) in batches)
+                {
+                    LoadBatch(start, count);
+                    _assetsManager.Clear();
+                    done += count;
+                    Report(done, _candidates.Count);
+                }
+                _released = true;
+                LogInfo($"Loaded {LoadedFiles} serialized file(s), {LoadedObjects} object(s) total");
             }
 
             LogInfo($"load {clock.ElapsedMilliseconds} ms");
             Report(1, 1);
+        }
+
+        private string _lastParent;
+
+        /// <summary>
+        /// Loads one range of the scan. This is the only place the loader is called, so it is the
+        /// only place that decides how much is in memory at once.
+        /// </summary>
+        private void LoadBatch(int start, int count)
+        {
+            // AssetsManager.LoadFilesAndFolders runs every entry through Path.GetFullPath, so it
+            // needs absolute paths. Relative names would silently resolve against the process
+            // working directory, which on Android is "/" and matches nothing.
+            // (It also clears the list it is given, hence the local.)
+            var paths = new List<string>(count);
+            for (var i = 0; i < count; i++) paths.Add(_candidates[start + i].Path);
+
+            // Dependencies are not a problem for batching: LoadAssetsFile queues the externals it
+            // finds next to the file on disk into importFiles, and Load() drains that queue while
+            // it grows, so a batch pulls in what it needs from the tree by name. A dependency
+            // shared by many batches is simply loaded more than once.
+            _assetsManager.LoadFilesAndFolders(out var parent, paths);
+            _lastParent = parent;
+            LoadedFiles += _assetsManager.AssetsFileList.Count;
+            LoadedObjects += _assetsManager.AssetsFileList.Sum(f => f.Objects.Count);
+        }
+
+        /// <summary>
+        /// Splits the scan into load batches, cut by whichever budget comes first.
+        ///
+        /// Consecutive files only, in path order: the scan is sorted, so a bundle's parts and its
+        /// siblings stay next to each other, and the loader's dependency lookup is by name rather
+        /// than by position, so nothing depends on a batch boundary falling anywhere in particular.
+        /// </summary>
+        private static IEnumerable<(int Start, int Count)> Batches(List<Candidate> files)
+        {
+            var i = 0;
+            while (i < files.Count)
+            {
+                var end = i;
+                long bytes = 0;
+                while (end < files.Count && end - i < BatchFiles)
+                {
+                    // Always take at least one file, even one bigger than the whole budget.
+                    if (end > i && bytes + files[end].Length > BatchBytes) break;
+                    bytes += files[end].Length;
+                    end++;
+                }
+
+                yield return (i, end - i);
+                i = end;
+            }
         }
 
         private const int HeaderLen = 1152; // the window FileReader reads for its own check
@@ -168,10 +289,13 @@ namespace AssetStudioMobile
         /// not match becomes FileType.ResourceFile, which LoadFile disposes and moves straight past,
         /// so dropping those here does not change what gets loaded -- only the time spent working
         /// out that they never were going to load.
+        ///
+        /// Returns the size alongside the path because the read already had it (fs.Length): batching
+        /// needs to know how many bytes it is taking on, and this way that costs no second stat.
         /// </summary>
-        private List<string> SniffCandidates(string[] files)
+        private List<Candidate> SniffCandidates(string[] files)
         {
-            var kept = new List<string>(files.Length);
+            var kept = new List<Candidate>(files.Length);
             var gate = new object();
             var seen = 0;
 
@@ -184,9 +308,10 @@ namespace AssetStudioMobile
                 (path, _, buffer) =>
                 {
                     if (!HopelessNames.Contains(Path.GetExtension(path).ToLowerInvariant()) &&
-                        HasUnityHeader(path, buffer))
+                        HasUnityHeader(path, buffer, out var size))
                     {
-                        lock (gate) kept.Add(path);
+                        var candidate = new Candidate(path, size);
+                        lock (gate) kept.Add(candidate);
                     }
 
                     // Throttled: one UI post per file would cost more than the reads do.
@@ -195,18 +320,21 @@ namespace AssetStudioMobile
                 },
                 _ => { });
 
-            kept.Sort(StringComparer.Ordinal); // Parallel.ForEach makes no order guarantee.
+            kept.Sort((a, b) => string.CompareOrdinal(a.Path, b.Path)); // Parallel.ForEach makes no order guarantee.
             return kept;
         }
 
         /// <summary>
         /// Mirrors AssetStudio.FileReader.CheckFileType. Every branch that returns something other
         /// than ResourceFile is reproduced, so nothing the loader would act on gets dropped.
+        ///
+        /// <paramref name="size"/> is the file length, handed back so the caller does not have to
+        /// stat a file it has just opened.
         /// </summary>
-        private static bool HasUnityHeader(string path, byte[] buffer)
+        private static bool HasUnityHeader(string path, byte[] buffer, out long size)
         {
             int len;
-            long size;
+            size = 0;
             try
             {
                 using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
@@ -325,6 +453,41 @@ namespace AssetStudioMobile
             var report = new ExportReport();
             Directory.CreateDirectory(outputRoot);
 
+            if (!_released)
+            {
+                // The tree fit one batch, so everything is still loaded and there is nothing to
+                // read again. Per-asset progress, because the asset count is the whole job.
+                var targets = CollectTargets(options);
+                Report(0, targets.Count);
+                WriteTargets(targets, outputRoot, options, report, perAssetProgress: true);
+                Finish(report);
+                return report;
+            }
+
+            // Batched: read one batch in, export what it holds, drop it, next. Peak memory is one
+            // batch however many bundles the tree has, which is the point -- a 4.1 GB cache exports
+            // in the same footprint as a small one.
+            LogInfo($"exporting {_candidates.Count} file(s), at most {BatchFiles} or " +
+                    $"{BatchBytes / (1024 * 1024)} MB per batch");
+            var done = 0;
+            foreach (var (start, count) in Batches(_candidates))
+            {
+                LoadBatch(start, count);
+                // Progress is by file here, not by asset: the asset count is only known once the
+                // whole tree has been read, and the bar restarting for every batch would be worse
+                // than a coarse one.
+                WriteTargets(CollectTargets(options), outputRoot, options, report, perAssetProgress: false);
+                _assetsManager.Clear();
+                done += count;
+                Report(done, _candidates.Count);
+            }
+            Finish(report);
+            return report;
+        }
+
+        /// <summary>Everything currently loaded that the requested kind covers.</summary>
+        private List<AssetStudio.Object> CollectTargets(ExportOptions options)
+        {
             // Auto takes everything and lets Plan() decide the format per asset, so a bundle only
             // exports as far as there is a real exporter for its types. The explicit kinds stay
             // available for exporting one category at a time.
@@ -337,18 +500,23 @@ namespace AssetStudioMobile
                     if (o != null && Matches(o, options.Kind)) targets.Add(o);
                 }
             }
-            report.Matched = targets.Count;
+            return targets;
+        }
 
-            // Per-type tally up front, so the log says what was found before anything is written.
-            foreach (var g in targets.GroupBy(o => o.type.ToString()).OrderBy(g => g.Key, StringComparer.Ordinal))
+        /// <summary>
+        /// Writes one batch's assets into <paramref name="report"/>, which accumulates across
+        /// batches. <paramref name="perAssetProgress"/> is false when the caller drives the bar
+        /// itself at file granularity instead.
+        /// </summary>
+        private void WriteTargets(List<AssetStudio.Object> targets, string outputRoot, ExportOptions options,
+                                  ExportReport report, bool perAssetProgress)
+        {
+            report.Matched += targets.Count;
+
+            foreach (var g in targets.GroupBy(o => o.type.ToString()))
             {
-                report.ByType[g.Key] = g.Count();
+                report.ByType[g.Key] = Get(report.ByType, g.Key) + g.Count();
             }
-            LogInfo($"{targets.Count} asset(s): " +
-                    string.Join(" ", targets.GroupBy(o => o.type.ToString())
-                        .OrderBy(g => g.Key, StringComparer.Ordinal)
-                        .Select(g => $"{g.Key} x{g.Count()}")));
-            Report(0, targets.Count);
 
             var done = 0;
             foreach (var obj in targets)
@@ -378,21 +546,33 @@ namespace AssetStudioMobile
                     {
                         report.Failed++;
                         var msg = $"{DisplayName(obj)} ({obj.type}): {ex.GetType().Name}: {ex.Message}";
-                        report.Errors.Add(msg);
+                        // Capped: a batch full of assets that share one failure mode can produce
+                        // thousands of messages, and every one of them is a live string.
+                        if (report.Errors.Count < MaxReportedErrors) report.Errors.Add(msg);
                         LogWarn(msg);
                     }
                 }
 
-                Report(++done, targets.Count);
+                if (perAssetProgress) Report(++done, targets.Count);
+            }
+        }
+
+        /// <summary>One summary for the whole run, rather than one per batch.</summary>
+        private void Finish(ExportReport report)
+        {
+            if (report.ByType.Count > 0)
+            {
+                LogInfo($"{report.Matched} asset(s): " + string.Join(" ",
+                    report.ByType.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                        .Select(kv => $"{kv.Key} x{kv.Value}")));
             }
 
             if (report.Unexported.Count > 0)
             {
-                var u = new List<string>();
-                foreach (var kv in report.Unexported) u.Add($"{kv.Key}x{kv.Value}");
-                LogWarn("no exporter for: " + string.Join(", ", u));
+                LogWarn("no exporter for: " + string.Join(", ",
+                    report.Unexported.OrderBy(kv => kv.Key, StringComparer.Ordinal)
+                        .Select(kv => $"{kv.Key}x{kv.Value}")));
             }
-            return report;
         }
 
         private static int Get(Dictionary<string, int> d, string k)
@@ -559,7 +739,18 @@ namespace AssetStudioMobile
             return s.Length == 0 ? "unnamed" : s;
         }
 
-        public void Clear() => _assetsManager.Clear();
+        /// <summary>
+        /// Releases everything the loader is holding and forgets the scan, so the instance can be
+        /// reused or dropped without the objects staying reachable.
+        /// </summary>
+        public void Clear()
+        {
+            _assetsManager.Clear();
+            _candidates = null;
+            _released = false;
+            LoadedFiles = 0;
+            LoadedObjects = 0;
+        }
 
         public void Dispose() => Clear();
     }
