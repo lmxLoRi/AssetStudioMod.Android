@@ -10,6 +10,10 @@
 #include <string.h>
 #include <time.h>
 
+#ifndef INPUT_DIR
+#define INPUT_DIR "/tmp"
+#endif
+
 int decode_astc(const uint8_t *data, const long w, const long h, const int bw, const int bh, uint32_t *image);
 
 static double now_ms(void)
@@ -33,7 +37,7 @@ static void run(const char *label, int w, int h, int bw, int bh)
     // depends on which block modes the data uses, and two different random number generators would
     // not be the same work. Written by `t2d-bench gen`.
     char path[256];
-    snprintf(path, sizeof path, "/tmp/astc-input-%d-%d-%dx%d.bin", w, h, bw, bh);
+    snprintf(path, sizeof path, INPUT_DIR "/astc-input-%d-%d-%dx%d.bin", w, h, bw, bh);
     FILE *f = fopen(path, "rb");
     if (!f) { printf("  missing %s -- run `t2d-bench gen` first\n", path); free(data); free(out); return; }
     if (fread(data, 1, (size_t)bytes, f) != (size_t)bytes) { printf("  short read %s\n", path); fclose(f); free(data); free(out); return; }
@@ -46,6 +50,7 @@ static void run(const char *label, int w, int h, int bw, int bh)
     for (int i = 0; i < iters; i++) decode_astc(data, w, h, bw, bh, out);
     double ms = (now_ms() - t0) / iters;
 
+    { char op[256]; snprintf(op, sizeof op, INPUT_DIR "/ours-out-%dx%d.rgba", w, h); FILE* of = fopen(op, "wb"); if (of) { fwrite(out, 1, (size_t)blocks_x*bw*blocks_y*bh*4, of); fclose(of); } }
     // Checksum of the whole output: a speed comparison is only meaningful if both decoders are
     // producing the same image, not just running the same amount of code.
     unsigned long long sum = 0;
@@ -67,5 +72,6 @@ int main(void)
     run("ASTC 4x4", 512, 512, 4, 4);
     run("ASTC 6x6", 512, 512, 6, 6);
     run("ASTC 8x8", 512, 512, 8, 8);
+    run("ASTC 4x4 2048", 2048, 2048, 4, 4);
     return 0;
 }

@@ -80,6 +80,14 @@ namespace AssetStudioMobile
             Append($"output: {_outputDir}");
             Append("Import a folder of Unity bundles, then Scan, then Export.");
 
+            // `-e dumpastc 1` captures real compressed ASTC payloads so the decoders can be
+            // benchmarked on the data a game actually contains instead of on a test image. This has
+            // to come after the UI exists -- Append touches the log view, and calling it earlier
+            // threw in OnCreate, which restarted the activity without its intent and silently did
+            // nothing at all.
+            if (Intent?.GetStringExtra("dumpastc") != null || Intent?.GetIntExtra("dumpastc", 0) > 0)
+                InstallAstcDump();
+
             RunIntentAction(Intent);
         }
 
@@ -393,6 +401,39 @@ namespace AssetStudioMobile
         // ---------------- SAF import ----------------
 
         /// <summary>Picks a single .apk through SAF. No permission needed at all.</summary>
+        /// <summary>
+        /// Writes the first few compressed ASTC payloads it sees to the app's files directory.
+        /// </summary>
+        private void InstallAstcDump()
+        {
+            var dir = Path.Combine(GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath, "astc-dump");
+            Directory.CreateDirectory(dir);
+            var count = 0;
+            Texture2DConverter.RawTextureDump = (format, buffer, length, width, height) =>
+            {
+                // Runs on every worker thread inside the decode path, so it must not throw and must
+                // not let two threads pick the same file name. The first version did both and took
+                // the export down with it.
+                try
+                {
+                    var name = format.ToString();
+                    if (!name.StartsWith("ASTC_RGB_", StringComparison.Ordinal)) return;
+
+                    var index = System.Threading.Interlocked.Increment(ref count);
+                    if (index > 8) return;
+                    if (length <= 0 || length > buffer.Length) return;
+
+                    var file = Path.Combine(dir, $"{index:D2}_{name}_{width}x{height}.bin");
+                    File.WriteAllBytes(file, buffer.AsSpan(0, length).ToArray());
+                }
+                catch (Exception ex)
+                {
+                    Append($"astc dump failed: {ex.Message}");
+                }
+            };
+            Append("ASTC dump armed, writing to " + dir);
+        }
+
         private void PickApkFile()
         {
             var intent = new Intent(Intent.ActionOpenDocument);

@@ -80,6 +80,9 @@ namespace AssetStudio
             return new SixLabors.ImageSharp.Size(m_Width, m_Height);
         }
 
+        /// <summary>Dev hook, see the call site. Null costs a null check per texture.</summary>
+        public static Action<TextureFormat, byte[], int, int, int> RawTextureDump;
+
         public bool DecodeTexture2D(byte[] bytes)
         {
             if (reader.Size == 0 || m_Width == 0 || m_Height == 0)
@@ -95,6 +98,11 @@ namespace AssetStudio
                 mark = System.Diagnostics.Stopwatch.GetTimestamp();
                 _ = reader.GetData(buff);
                 Texture2DExtensions.PhaseTiming?.Invoke("  read input", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
+
+                // Dev hook: hands the raw compressed bytes to the caller before decoding. Used once to
+                // capture real ASTC payloads from a game, because a benchmark on a test image is only
+                // as good as the block modes that image happens to contain.
+                RawTextureDump?.Invoke(m_TextureFormat, buff, (int)reader.Size, m_Width, m_Height);
                 if (switchSwizzled)
                 {
                     var unswizzledData = BigArrayPool<byte>.Shared.Rent(reader.Size);

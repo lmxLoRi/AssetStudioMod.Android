@@ -1,50 +1,74 @@
 # astc-bench
 
-Compares the ASTC decoder the app ships (`Texture2DDecoderNative/astc.cpp`) against the Rust
-`texture2ddecoder` crate, on identical input.
+Compares the ASTC decoder the app ships (`Texture2DDecoderNative/astc.cpp`) against
+`arm-software/astc-encoder` (astcenc) and against the Rust `texture2ddecoder` crate, on identical
+input, on the phone, with the same compiler.
 
-## The input has to be real ASTC data
+## The input has to be the game's own data
 
-The first version of this fed random bytes in. That is not valid input: the Rust port panics
-(`bitreader.rs`, index out of range) and the C++ one segfaults, and before it did, it reported
-21 MPix/s -- a number that says nothing about decoding a real texture, because the blocks that
-survive take a path a real encoder never emits. Real payloads come out six times faster.
+Two wrong measurements happened here before the right one.
 
-Real payloads are taken from the Rust crate's own test vectors:
+The first fed random bytes in. Random bytes are not valid ASTC: the Rust port panics and the C++
+one segfaults, and the 21 MPix/s it reported first describes a path no real encoder emits.
 
-    python3 - <<'PY'
-    import struct, os
-    for name in ["ASTC_4x4", "ASTC_6x6", "ASTC_8x8"]:
-        d = open(f"/tmp/t2d-rs/resources/tests/textures/{name}.ktx2", "rb").read()
-        w, h = struct.unpack_from("<2I", d, 20)
-        off, ln, _ = struct.unpack_from("<3Q", d, 80)
-        open(f"/tmp/astc-input-{w}-{h}-{name.split('_')[1]}.bin", "wb").write(d[off:off+ln])
-    PY
+The second used the Rust crate's own test vector, `ASTC_4x4.ktx2` -- a 512x512 image of a cartoon
+crab. It reported 121-195 MPix/s and made the phone's in-app 27 MPix/s look like a six-fold
+discrepancy. It is not: the game's textures are 2048x1916 and up, and they decode at 46-50 MPix/s.
+A small, flat test image is 2.5x easier to decode than a real one, and comparing the two says
+nothing.
 
-Both harnesses then read the same files, which matters because ASTC decode time depends on which
-block modes the data happens to use.
+Real payloads come from the app itself. `Texture2DConverter.RawTextureDump` is a dev hook that
+hands over the compressed bytes before decoding, armed from the app with:
 
-## Results, desktop x86_64, 512x512 real textures
+    adb shell am start -n com.aelurum.assetstudiomod/...MainActivity \
+        -e action export -e path <dir> -e kind Texture -e dumpastc 1
 
-    C++ astc.cpp              Rust texture2ddecoder
-    ASTC 4x4   129.4 MPix/s   85.7 MPix/s     C++ 1.51x faster
-    ASTC 6x6   143.6 MPix/s  112.7 MPix/s     C++ 1.27x faster
-    ASTC 8x8   148.0 MPix/s  115.0 MPix/s     C++ 1.29x faster
-    checksums: identical for all three
+It writes `files/astc-dump/NN_ASTC_RGB_<bx>x<by>_<w>x<h>.bin`, whose names carry everything the
+harnesses need. Copy them into the input naming the harnesses use:
 
-So the crate is a faithful port -- byte-identical output -- that is 1.3 to 1.5x slower. It is not
-an upgrade, and neither is `latias94/unity-asset`, whose decode crate depends on this same
-`texture2ddecoder` (`unity-asset-decode/Cargo.toml`, feature `texture-advanced`).
+    cd .../astc-dump && for f in *.bin; do
+      #  02_ASTC_RGB_4x4_2048x1916.bin  ->  astc-input-2048-1916-4x4.bin
+      ...
+    done
 
-This also corrects the conclusion recorded in 13ce65f. That commit said the decoder runs at desktop
-speed on a phone, so there was nothing to win. That was measured on random blocks at 21 MPix/s.
-On real data the desktop does 129-148 MPix/s against the phone's 27 MPix/s, a ratio of about 4.8x,
-which is an ordinary desktop-to-phone gap. The direction of the answer is the same and now has a
-sound basis -- the phone is where it should be, and the Rust alternative is slower -- but the
-reason first given for it was not.
+## Results, phone (moto g200), same input, same compiler
 
-## Running
+    input                ours        astcenc NEON   Rust
+    ferris 512x512       121.1       64.7           85.7
+    game 2048x1916        47.7       38.9
+    game 2048x1872        45.8       36.7
+    game  943x2048        46.6       31.6
+    game 1066x2048        50.2       34.0
 
-    /tmp/t2d-bench/target/release/t2d-bench          # Rust, path dependency on the cloned crate
-    ./astc_bench                                     # C++, built as below
-    g++ -O3 -o astc_bench astc_bench.cpp ../../Texture2DDecoderNative/astc.cpp -I../../Texture2DDecoderNative
+All in MPix/s. Ours is 1.2-1.9x faster than astcenc's NEON path and than the Rust port, on the
+data that matters. `astc.cpp` is scalar C and beats both SIMD implementations, so there is nothing
+to gain by swapping it and something to lose.
+
+Outputs agree: ours and the Rust port are byte-identical, and astcenc differs from both only by
+R/B being swapped (ours is BGRA, astcenc RGBA) plus +/-1 rounding on 3.24% of pixels, which is two
+implementations of the same weight interpolation rounding differently. Neither is wrong.
+
+## Harnesses
+
+    shipped_so_bench.cpp   dlopen()s the libTexture2DDecoderNative.so from the APK and times the
+                           exported DecodeASTC directly, so the comparison is against the binary
+                           that actually ships rather than against a fresh rebuild of the source.
+                           It measured the same as a fresh -O3 build (163 vs 168 MPix/s), which
+                           rules out the shipped library having been built badly.
+    astcenc_bench.cpp      links libastcenc-neon-static.a built with the NDK for arm64.
+    astc_bench.cpp         our astc.cpp compiled directly.
+
+Build for the phone:
+
+    NDK=/path/to/android-ndk-r27c
+    CXX=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++
+    $CXX -O3 -std=c++17 -DINPUT_DIR='"/data/local/tmp"' \
+         -o bench-astcenc-arm64 astcenc_bench.cpp -I<astcenc>/Source <astcenc>/build-arm64/Source/libastcenc-neon-static.a
+    $CXX -O2 -std=c++17 -DINPUT_DIR='"/data/local/tmp"' -o bench-shipped-arm64 shipped_so_bench.cpp -ldl
+
+Push with the input files and `libTexture2DDecoderNative.so`, then:
+
+    adb shell "LD_LIBRARY_PATH=/data/local/tmp /data/local/tmp/bench-shipped-arm64"
+
+`-static` does not work with the NDK here (`executable's TLS segment is underaligned`); the
+binaries link libc dynamically and libc++_shared.so has to be pushed alongside.
