@@ -7,6 +7,10 @@
 //
 // Filtering is Paeth on every row, which is what the ImageSharp encoder was configured to use, so
 // output sizes stay in the same range instead of ballooning like a no-filter write would.
+//
+// The deflate is the platform zlib. libdeflate was tried here and reverted: on a moto g200 it took
+// 1008.8s of CPU for the same 8487 textures where zlib took 562.9s, at an identical output size.
+// The algorithm is the wall, and swapping the library does not move it.
 
 #include <stdio.h>
 #include <stdlib.h>

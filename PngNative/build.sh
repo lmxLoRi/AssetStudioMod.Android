@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Builds libPngNative.so for the ABIs the app ships. Links the platform zlib (-lz), which is one
-# of the few libraries the NDK guarantees, so nothing is vendored here.
+# Builds libPngNative.so for the ABIs the app ships.
+#
+# Links the platform zlib (-lz), which is one of the few libraries the NDK guarantees. libdeflate
+# was tried and removed: it measured 79% slower than zlib on this workload, see png_write.c.
 set -euo pipefail
 
 NDK=${ANDROID_NDK_HOME:-/tmp/opencode/ndk/android-ndk-r27c}
