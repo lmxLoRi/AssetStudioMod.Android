@@ -21,6 +21,39 @@ namespace AssetStudio
         private static void Phase(string name, long startTicks)
             => PhaseTiming?.Invoke(name, System.Diagnostics.Stopwatch.GetTimestamp() - startTicks);
 
+        /// <summary>
+        /// Decodes straight to a rented BGRA buffer, without building the ImageSharp image the export
+        /// does not need -- the PNG encoder wants the raw pixels, and LoadPixelData was 39.4s of CPU
+        /// for 8487 textures just allocating and copying into an intermediate.
+        ///
+        /// Returns null when the texture needs the swizzle path, which still has to go through
+        /// ConvertToImage because that is where the unswizzle and crop live; Switch textures do not
+        /// occur in the Android games this is for, so the fallback costs nothing in practice.
+        ///
+        /// The caller owns the buffer and must return it with <see cref="ReturnDecodedBuffer"/>.
+        /// </summary>
+        public static byte[] DecodeToBgraBuffer(this Texture2D m_Texture2D, out int width, out int height)
+        {
+            width = m_Texture2D.m_Width;
+            height = m_Texture2D.m_Height;
+
+            var converter = new Texture2DConverter(m_Texture2D);
+            if (converter.UsesSwitchSwizzle) return null;
+
+            var buff = BigArrayPool<byte>.Shared.Rent(converter.OutputDataSize);
+            if (!converter.DecodeTexture2D(buff))
+            {
+                BigArrayPool<byte>.Shared.Return(buff, clearArray: true);
+                return null;
+            }
+            return buff;
+        }
+
+        public static void ReturnDecodedBuffer(byte[] buffer)
+        {
+            if (buffer != null) BigArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+        }
+
         public static Image<Bgra32> ConvertToImage(this Texture2D m_Texture2D, bool flip)
         {
             var converter = new Texture2DConverter(m_Texture2D);

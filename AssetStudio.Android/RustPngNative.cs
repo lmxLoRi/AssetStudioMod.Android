@@ -54,6 +54,30 @@ namespace AssetStudioMobile
         /// where the caller's flip went: doing it here is the same bytes moved, and doing it in
         /// managed code first measured 60.2s of CPU for 8487 textures.
         /// </summary>
+        /// <summary>
+        /// Writes an already decoded BGRA buffer, with no ImageSharp image in the way. The buffer
+        /// must hold at least width*height*4 bytes.
+        /// </summary>
+        public static unsafe bool TryWriteBuffer(string path, byte[] bgra, int width, int height,
+                                                 bool flipVertical, bool assumeOpaque)
+        {
+            if (bgra == null || width <= 0 || height <= 0) return false;
+            if ((long)width * height * 4 > bgra.Length) return false;
+
+            try
+            {
+                fixed (byte* pixels = bgra)
+                {
+                    return rust_png_write_bgra(path, pixels, width, height,
+                                               flipVertical ? 1 : 0, assumeOpaque ? 1 : 0) == 0;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public static unsafe bool TryWrite(string path, Image<Bgra32> image, bool flipVertical, bool assumeOpaque)
         {
             var length = image.Width * 4 * image.Height;

@@ -840,15 +840,45 @@ namespace AssetStudioMobile
                         Extension = ".png",
                         Write = (obj, dest, opt) =>
                         {
-                            // Decoded without the vertical flip and flipped by the encoder instead,
-                            // which does it inside the BGRA->RGBA pass it was making anyway. Flipping
-                            // here first measured 60.2s of CPU across 8487 textures.
+                            var asset = (Texture2D)obj;
+                            var opaque = FormatHasNoAlpha(asset.m_TextureFormat);
                             var t0 = Stopwatch.GetTimestamp();
-                            var image = ((Texture2D)obj).ConvertToImage(false);
-                            Stats.AddTexture(tex.m_TextureFormat.ToString(),
+
+                            // Straight to a buffer and into the encoder, with no ImageSharp image in
+                            // between: LoadPixelData was 39.4s of CPU for 8487 textures, allocating
+                            // and copying into an intermediate the encoder never wanted.
+                            if (RustPngNative.Available)
+                            {
+                                var buffer = asset.DecodeToBgraBuffer(out var w, out var h);
+                                Stats.AddTexture(asset.m_TextureFormat.ToString(),
+                                                 Stopwatch.GetTimestamp() - t0, (long)w * h);
+                                if (buffer != null)
+                                {
+                                    // A fresh mark: reusing t0 here counted the decode a second time
+                                    // and inflated the encode by everything the decode costs.
+                                    var encodeMark = Stopwatch.GetTimestamp();
+                                    try
+                                    {
+                                        if (RustPngNative.TryWriteBuffer(dest, buffer, w, h,
+                                                                         opt.FlipTextures, opaque))
+                                        {
+                                            Stats.AddEncode(Stopwatch.GetTimestamp() - encodeMark);
+                                            return;
+                                        }
+                                    }
+                                    finally
+                                    {
+                                        Texture2DExtensions.ReturnDecodedBuffer(buffer);
+                                    }
+                                }
+                                // Fall through: the swizzle path, or the encoder refused.
+                            }
+
+                            var image = asset.ConvertToImage(false);
+                            Stats.AddTexture(asset.m_TextureFormat.ToString(),
                                              Stopwatch.GetTimestamp() - t0,
-                                             (long)tex.m_Width * tex.m_Height);
-                            WriteImage(image, dest, opt, opt.FlipTextures, FormatHasNoAlpha(tex.m_TextureFormat));
+                                             (long)asset.m_Width * asset.m_Height);
+                            WriteImage(image, dest, opt, opt.FlipTextures, opaque);
                         },
                     };
 
