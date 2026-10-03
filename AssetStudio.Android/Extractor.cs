@@ -915,13 +915,22 @@ namespace AssetStudioMobile
             {
                 var t0 = Stopwatch.GetTimestamp();
 
-                // Native first: same Paeth filtering and the same zlib format, but a real optimised
-                // deflate instead of ImageSharp's managed one. Falls through if the write fails.
-                if (options.ImageFormat == ImageFormat.Png && image is Image<Bgra32> bgra && PngNative.Available
-                    && PngNative.TryWrite(dest, bgra, PngLevel))
+                // Rust first, then the C encoder, then ImageSharp: all three write the same PNG,
+                // and they are ordered by what each one's deflate measured. Falls through on any
+                // failure, so a missing or broken library costs speed rather than the export.
+                if (options.ImageFormat == ImageFormat.Png && image is Image<Bgra32> bgra)
                 {
-                    Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
-                    return;
+                    if (RustPngNative.Available && RustPngNative.TryWrite(dest, bgra))
+                    {
+                        Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
+                        return;
+                    }
+
+                    if (PngNative.Available && PngNative.TryWrite(dest, bgra, PngLevel))
+                    {
+                        Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
+                        return;
+                    }
                 }
 
                 using (var fs = File.Create(dest))
