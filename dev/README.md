@@ -16,18 +16,28 @@ to keep machine state out of it:
     1080x800      78 ms  1015 KB          10.3 ms   973 KB    7.6x
     2048x2048    433 ms  5801 KB          63.0 ms  6220 KB    6.9x
 
-The win is not the language: compiling the *same* C zlib through Rust's flate2 zlib backend
-measures the same as calling it from C. It is `fdeflate`, which the `png` crate uses for
-`Compression::Fast` (png/src/encoder.rs, "Compression::Fast => fdeflate::Compressor::new").
-fdeflate is a deflate implementation written specifically for fast PNG encoding, and there is
-nothing like it in the current C path -- zlib level 1 is a general-purpose deflate.
+What is demonstrated is that the *deflate implementation* is the difference, not the language:
+`fdeflate` is what the `png` crate uses for `Compression::Fast`
+(png/src/encoder.rs, "Compression::Fast => fdeflate::Compressor::new"), and it is a deflate
+written specifically for fast PNG encoding. zlib level 1 is a general-purpose deflate.
+
+The `czlib` feature here does **not** test "Rust calling C zlib", because the Fast path is
+hardcoded to fdeflate and never consults flate2: it only changes the non-Fast path. So there is
+no measurement here of what Rust plus a general C deflate would cost, and none is claimed.
+
+Whether a general C deflate can match fdeflate at this level is open. libdeflate level 1 was
+measured slower than zlib *on the phone* in the shipping app; zlib-ng was not tried.
 
 Note also that `brotli`, `zstd` and `lz4` are all available as Rust crates with C-comparable
 performance, so there is no penalty for the boundary; the crate is the point.
 
-Caveats: desktop x86_64, and the two smaller images favour fdeflate on size while the 2048x2048
-is 7% larger. The next step is cross-compiling the encoder for aarch64-linux-android and calling
-it from the app, which means `rustup target add aarch64-linux-android` and the NDK as linker.
+Caveats: desktop x86_64, not the phone. The two smaller images also get *smaller* from fdeflate
+while the 2048x2048 grows 7%. One C reading of 33 ms was machine noise; the stable value is 63 ms
+and that is what is quoted.
+
+The next step is cross-compiling the encoder for aarch64-linux-android and calling it from the app
+the way libLz4Native is called, which means `rustup target add aarch64-linux-android` plus the NDK
+as linker. Until that is measured on the phone, 6.5x here is a promise about a desktop.
 
 Run:
 
