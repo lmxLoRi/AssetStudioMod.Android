@@ -59,6 +59,38 @@ dotnet publish AssetStudio.Android/AssetStudio.Android.csproj -c Release
 `AssetStudio.Android` is deliberately **not** added to `AssetStudio.sln`: the solution is
 restored by the Windows CI with `nuget restore`, which has no `android` workload available.
 
+## Choosing a directory
+
+There are two independent paths, because neither one covers everything:
+
+### All-files access (recommended)
+
+Granting `MANAGE_EXTERNAL_STORAGE` lets the app read and write **any real filesystem path**
+directly — no copying at all, which matters a lot for multi-gigabyte bundle sets. The user grants
+it once via the **Grant all-files access** button, which opens the per-app toggle in Settings.
+After that you can type or paste any path (`/sdcard/Download/mygame`) into **Bundle folder** and
+press **Load**.
+
+Two limitations worth knowing:
+
+- **It does not reach other apps' app-specific directories.** The platform documentation is
+  explicit: `/sdcard/Android/data/<other package>/` stays inaccessible. Unity games keep their
+  data exactly there, so bundles that are still inside a game's own directory cannot be read this
+  way. Copy them out first, or use the SAF path.
+- **Google Play does not permit this permission for asset-extraction apps.** It requires a
+  Permissions Declaration Form and an approved use case, and extraction is not one. Fine for
+  sideloading; the SAF path keeps the app policy-clean if that ever matters.
+
+### Storage Access Framework (fallback, no permission)
+
+**Pick folder (copies files)** opens `ACTION_OPEN_DOCUMENT_TREE` and copies the tree into the
+app's external files dir. Always available, but a copy is unavoidable: AssetStudio needs seekable
+real files and a `content://` URI cannot provide them. When all-files access happens to be
+granted, the app first tries to map the tree back to a real path and reads it in place instead.
+
+Whichever route you take, the folder is **loaded immediately** — there is no separate scan step
+(**Rescan** is only there if the folder changed underneath you).
+
 ## Using it
 
 Input and output both live under `getExternalFilesDir(null)`:
@@ -96,11 +128,19 @@ ACT=com.aelurum.assetstudiomod/crc6457c8bc28ddf7d589.MainActivity
 
 adb shell am start -n $ACT -e action selftest
 adb shell am start -n $ACT -e action scan
+adb shell am start -n $ACT -e action load   -e path /sdcard/Download/mygame
 adb shell am start -n $ACT -e action export -e kind Texture2D --ez overwrite true
+
+# one-shot: point at a directory, load it and export in a single invocation
+adb shell am start -n $ACT -e action export -e path /sdcard/Download/mygame \
+    -e kind Texture2D --ez overwrite true
 ```
 
-`kind` is any `ExportKind` name (`Texture2D`, `Sprite`, `JsonDump`, `TextAsset`, `RawData`).
+`kind` is any `ExportKind` name (`Texture`, `Sprite`, `JsonDump`, `TextAsset`, `RawData`).
 `export` scans first if nothing is loaded, since each `am start` is a fresh process.
+
+`path` exists because `adb shell input text` cannot reliably type `/` through a CJK IME, so
+setting the path through an intent extra is the only dependable way to script a run.
 
 ## Why certain things are missing
 

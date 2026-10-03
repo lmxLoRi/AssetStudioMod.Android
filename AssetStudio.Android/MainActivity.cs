@@ -23,6 +23,10 @@ namespace AssetStudioMobile
         private TextView _log;
         private ProgressBar _bar;
         private Button _btnImport;
+        private Button _btnGrant;
+        private TextView _permStatus;
+        private EditText _inputPath;
+        private EditText _outputPath;
         private Button _btnScan;
         private Button _btnExport;
         private Spinner _kind;
@@ -50,12 +54,19 @@ namespace AssetStudioMobile
             // it trivial to sideload a bundle for testing. Falls back to private storage.
             var external = GetExternalFilesDir(null)?.AbsolutePath;
             _inputDir = Path.Combine(external ?? FilesDir.AbsolutePath, "bundles");
-            _outputDir = Path.Combine(external ?? FilesDir.AbsolutePath, "out");
+            _outputDir = Path.Combine(
+                global::Android.OS.Environment.GetExternalStoragePublicDirectory(
+                    global::Android.OS.Environment.DirectoryDownloads)?.AbsolutePath
+                ?? Path.Combine(external ?? FilesDir.AbsolutePath, "out"),
+                "AssetStudioExport");
             Directory.CreateDirectory(_inputDir);
 
             Logger.Default = new AndroidLogger(this);
 
             SetContentView(BuildUi());
+            _inputPath.Text = _inputDir;
+            _outputPath.Text = _outputDir;
+            RefreshPermissionUi();
             Append($"input : {_inputDir}");
             Append($"output: {_outputDir}");
             Append("Import a folder of Unity bundles, then Scan, then Export.");
@@ -67,13 +78,34 @@ namespace AssetStudioMobile
         {
             var root = new LinearLayout(this) { Orientation = Orientation.Vertical };
 
-            _btnImport = new Button(this) { Text = "Import bundle folder..." };
+            _btnGrant = new Button(this) { Text = "Grant all-files access" };
+            _btnGrant.Click += (_, __) => RequestAllFilesAccess();
+            root.AddView(_btnGrant);
+
+            _permStatus = new TextView(this) { TextSize = 11f };
+            root.AddView(_permStatus);
+
+            root.AddView(new TextView(this) { Text = "Bundle folder" });
+            var inputRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+            _inputPath = new EditText(this) { Hint = "/sdcard/Download/mygame", TextSize = 12f };
+            _inputPath.LayoutParameters = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f);
+            inputRow.AddView(_inputPath);
+            var loadBtn = new Button(this) { Text = "Load" };
+            loadBtn.Click += (_, __) => LoadFromPathField();
+            inputRow.AddView(loadBtn);
+            root.AddView(inputRow);
+
+            _btnImport = new Button(this) { Text = "Pick folder (copies files)" };
             _btnImport.Click += (_, __) => PickTree();
             root.AddView(_btnImport);
 
-            _btnScan = new Button(this) { Text = "Scan / load" };
+            _btnScan = new Button(this) { Text = "Rescan" };
             _btnScan.Click += (_, __) => RunOnBackground(Scan);
             root.AddView(_btnScan);
+
+            root.AddView(new TextView(this) { Text = "Export to" });
+            _outputPath = new EditText(this) { TextSize = 12f };
+            root.AddView(_outputPath);
 
             _kind = new Spinner(this);
             _kind.Adapter = ArrayAdapter.CreateFromResource(this, Resource.Array.export_kinds, Android.Resource.Layout.SimpleSpinnerDropDownItem);
@@ -145,7 +177,38 @@ namespace AssetStudioMobile
                 case "scan":
                     RunOnBackground(Scan);
                     break;
+                case "load":
+                {
+                    // `adb shell input text` cannot reliably type '/' through a CJK IME, so the
+                    // path comes in as an extra instead.
+                    var p = intent.GetStringExtra("path");
+                    if (!string.IsNullOrWhiteSpace(p))
+                    {
+                        _inputPath.Text = p;
+                        LoadFromPathField();
+                    }
+                    else
+                    {
+                        Append("ERROR: -e path is required for action=load");
+                    }
+                    break;
+                }
                 case "export":
+                {
+                    // Optional: point the run at a directory without touching the UI field.
+                    var exportPath = intent.GetStringExtra("path");
+                    if (!string.IsNullOrWhiteSpace(exportPath))
+                    {
+                        var problem = StorageAccess.ValidateReadableDirectory(exportPath);
+                        if (problem != null)
+                        {
+                            Append($"ERROR: {exportPath}: {problem}");
+                            break;
+                        }
+                        _inputDir = Path.GetFullPath(exportPath.Trim());
+                        _inputPath.Text = _inputDir;
+                    }
+
                     var kindName = intent.GetStringExtra("kind");
                     var idx = 0;
                     if (!string.IsNullOrEmpty(kindName))
@@ -161,7 +224,53 @@ namespace AssetStudioMobile
                         Export(idx, _overwrite.Checked);
                     });
                     break;
+                }
             }
+        }
+
+        protected override void OnResume()
+        {
+            base.OnResume();
+            RefreshPermissionUi();
+        }
+
+        private void RefreshPermissionUi()
+        {
+            if (_permStatus == null || _btnGrant == null) return;
+            var granted = StorageAccess.HasAllFilesAccess();
+            _btnGrant.Visibility = granted ? ViewStates.Gone : ViewStates.Visible;
+            _permStatus.Text = granted
+                ? "all-files access: GRANTED (read/write any path)"
+                : "all-files access: not granted. You can still pick a folder, but files will be copied.";
+        }
+
+        private void RequestAllFilesAccess()
+        {
+            try
+            {
+                StartActivity(StorageAccess.BuildAllFilesAccessIntent(this));
+            }
+            catch (Exception ex)
+            {
+                Append($"ERROR: cannot open all-files settings ({ex.Message})");
+            }
+        }
+
+        /// <summary>Loads the directory typed into the path field, then scans it (feature 4).</summary>
+        private void LoadFromPathField()
+        {
+            var typed = _inputPath.Text;
+            var problem = StorageAccess.ValidateReadableDirectory(typed);
+            if (problem != null)
+            {
+                Append($"ERROR: {typed}: {problem}");
+                SetStatus(problem);
+                return;
+            }
+
+            _inputDir = Path.GetFullPath(typed.Trim());
+            _inputPath.Text = _inputDir;
+            RunOnBackground(Scan);
         }
 
         // ---------------- SAF import ----------------
@@ -186,6 +295,19 @@ namespace AssetStudioMobile
             if (requestCode != ReqPickTree || resultCode != Result.Ok || data?.Data == null) return;
 
             var uri = data.Data;
+
+            // If all-files access is held we can usually map the tree back to a real path and read
+            // it in place, which avoids copying potentially gigabytes of bundles.
+            var direct = StorageAccess.TryResolveTreePath(this, uri);
+            if (direct != null)
+            {
+                Append($"Using {direct} directly (no copy)");
+                _inputDir = direct;
+                _inputPath.Text = direct;
+                RunOnBackground(Scan); // feature 4: no separate scan step
+                return;
+            }
+
             try
             {
                 ContentResolver.TakePersistableUriPermission(uri, ActivityFlags.GrantReadUriPermission);
@@ -203,7 +325,8 @@ namespace AssetStudioMobile
             Append($"Importing {uri} ...");
             var copied = ImportUtils.CopyTree(this, uri, _inputDir, Append, (c, t) => Report(c, t));
             Append($"Imported {copied} file(s) into {_inputDir}");
-            SetStatus($"{copied} file(s) imported");
+            _inputPath.Text = _inputDir;
+            Scan(); // feature 4: load straight after the directory is chosen
         }
 
         // ---------------- work ----------------
@@ -215,7 +338,8 @@ namespace AssetStudioMobile
                 : 0;
             if (files == 0)
             {
-                SetStatus("No input files. Import a bundle folder first.");
+                SetStatus("No input files in the input folder");
+                Append("No input files. Pick a folder, or set a path and press Load.");
                 return;
             }
 
@@ -235,7 +359,8 @@ namespace AssetStudioMobile
         {
             if (_extractor == null)
             {
-                SetStatus("Scan first.");
+                SetStatus("Scan first");
+                Append("Nothing loaded yet. Pick a folder or set a path and press Load.");
                 return;
             }
 
@@ -245,8 +370,11 @@ namespace AssetStudioMobile
                 Overwrite = overwrite,
             };
 
+            var baseDir = string.IsNullOrWhiteSpace(_outputPath?.Text)
+                ? _outputDir
+                : _outputPath.Text.Trim();
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            var dest = Path.Combine(_outputDir, $"{options.Kind}_{stamp}");
+            var dest = Path.Combine(baseDir, $"{options.Kind}_{stamp}");
             Append($"Exporting {options.Kind} -> {dest}");
 
             var report = _extractor.Export(dest, options);

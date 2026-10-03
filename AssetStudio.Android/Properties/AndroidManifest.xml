@@ -6,9 +6,14 @@
                android:roundIcon="@mipmap/appicon_round"
                android:supportsRtl="true" />
 
-  <!-- Bundles are read through the Storage Access Framework (ACTION_OPEN_DOCUMENT_TREE) and
-       copied into app-private storage, so no broad storage permission is required. This
-       keeps the app inside ordinary Play Store policy; MANAGE_EXTERNAL_STORAGE is not used. -->
+  <!-- Optional. Unlocks reading and writing any real filesystem path directly, with no copying.
+       The user has to grant it manually in Settings, and Google Play does not permit it for asset
+       extraction tools, so the app is fully usable without it (see StorageAccess). Note that even
+       with it, other apps' Android/data directories stay out of reach. -->
+  <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+  <!-- Bundles can also be read through the Storage Access Framework (ACTION_OPEN_DOCUMENT_TREE),
+       which needs no permission and is the policy-clean path. -->
   <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
                    android:maxSdkVersion="32" />
 </manifest>
