@@ -17,6 +17,7 @@ namespace AssetStudioMobile
         private static long _lz4Ticks, _lz4Bytes;
         private static long _texTicks, _texCount, _texPixels;
         private static long _encodeTicks, _encodeCount;
+        private static long _rawBytes, _rawCount;
 
         public static void AddLz4(long ticks, int bytes)
         {
@@ -29,6 +30,12 @@ namespace AssetStudioMobile
             Interlocked.Add(ref _texTicks, ticks);
             Interlocked.Add(ref _texCount, 1);
             Interlocked.Add(ref _texPixels, pixels);
+        }
+
+        public static void AddRaw(long bytes)
+        {
+            Interlocked.Add(ref _rawBytes, bytes);
+            Interlocked.Add(ref _rawCount, 1);
         }
 
         public static void AddEncode(long ticks)
@@ -59,7 +66,12 @@ namespace AssetStudioMobile
                 ? $"    PNG encode+write{enc / 1000,8:F1}s  {encN,8} files   {encN / (enc / 1000),6:F0}/s\n"
                 : "    PNG encode+write(none)\n";
 
-            return "\n--- measured in-process ---\n" + lz4 + texture + encode;
+            var rawN = Volatile.Read(ref _rawCount);
+            var raw = rawN > 0
+                ? $"    raw texture out {Volatile.Read(ref _rawBytes) / 1048576,8} MB  {rawN,8} files\n"
+                : "";
+
+            return "\n--- measured in-process ---\n" + lz4 + texture + encode + raw;
         }
     }
 }

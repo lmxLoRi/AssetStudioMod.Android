@@ -207,7 +207,24 @@ namespace AssetStudioMobile
             if (string.IsNullOrEmpty(leaf)) leaf = "staged";
             var target = Path.Combine(stagingRoot, leaf);
             Directory.CreateDirectory(stagingRoot);
-            if (Directory.Exists(target)) Directory.Delete(target, true);
+
+            // The previous tree is removed through shell, not Directory.Delete. cp runs as uid 2000,
+            // so everything under here is owned by shell with mode 0660 and directories with no
+            // permissions for anyone else: this app can read it (the platform's Android/data check
+            // is per package) but cannot unlink it, and Directory.Delete throws
+            // UnauthorizedAccessException on the first file it meets. Shell can remove what shell
+            // wrote. A fresh name is the fallback, so a tree that cannot be removed at all costs
+            // disk space rather than failing the run.
+            if (Directory.Exists(target))
+            {
+                Run($"rm -rf {ShellQuote(target)} 2>&1");
+                if (Directory.Exists(target))
+                {
+                    var replacement = target + "-" + DateTime.Now.ToString("HHmmss");
+                    log?.Invoke($"shizuku: could not clear {target}; staging into {Path.GetFileName(replacement)} instead");
+                    target = replacement;
+                }
+            }
 
             log?.Invoke($"shizuku: copying {sourceDir} -> {target}");
 

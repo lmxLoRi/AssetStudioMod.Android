@@ -27,6 +27,13 @@ namespace AssetStudioMobile
         TextAsset,
         JsonDump,
         RawData,
+
+        /// <summary>
+        /// Texture2D only, written as the bytes the file holds -- no decode to RGBA, no encode to
+        /// PNG. This is what a DDS/KTX/TGA writer needs, and it is here first as a measurement of
+        /// what the export costs once the codecs are out of the way.
+        /// </summary>
+        TextureRaw,
     }
 
     public sealed class ExportOptions
@@ -181,6 +188,7 @@ namespace AssetStudioMobile
             ExportKind.Sprite => new[] { ClassIDType.Sprite },   // also pulls Texture2D + SpriteAtlas
             ExportKind.Mesh => new[] { ClassIDType.Mesh },
             ExportKind.TextAsset => new[] { ClassIDType.TextAsset },
+            ExportKind.TextureRaw => new[] { ClassIDType.Texture2D },
             _ => null,
         };
 
@@ -768,6 +776,7 @@ namespace AssetStudioMobile
             ExportKind.TextAsset => o is TextAsset,
             ExportKind.JsonDump => true,
             ExportKind.RawData => true,
+            ExportKind.TextureRaw => o is Texture2D t2 && t2.m_Width > 0 && t2.m_Height > 0,
             _ => false,
         };
 
@@ -786,6 +795,21 @@ namespace AssetStudioMobile
         {
             switch (o)
             {
+                case Texture2D raw when options.Kind == ExportKind.TextureRaw
+                                        && raw.m_Width > 0 && raw.m_Height > 0:
+                    return new ExportPlan
+                    {
+                        // Whatever the file holds: DXT1/5, ASTC, ETC2, or plain RGBA32. This is the
+                        // step that a DDS/KTX/TGA header would be prepended to.
+                        Extension = ".bin",
+                        Write = (obj, dest, opt) =>
+                        {
+                            var data = ((Texture2D)obj).image_data.GetData();
+                            File.WriteAllBytes(dest, data);
+                            Stats.AddRaw(data.Length);
+                        },
+                    };
+
                 case Texture2D tex when tex.m_Width > 0 && tex.m_Height > 0:
                     return new ExportPlan
                     {

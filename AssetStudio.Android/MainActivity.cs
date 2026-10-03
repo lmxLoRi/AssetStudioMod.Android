@@ -116,7 +116,13 @@ namespace AssetStudioMobile
             root.AddView(_outputPath);
 
             _kind = new Spinner(this);
-            _kind.Adapter = ArrayAdapter.CreateFromResource(this, Resource.Array.export_kinds, Android.Resource.Layout.SimpleSpinnerDropDownItem);
+
+            // Built from the enum rather than the export_kinds string array. The two drifted apart
+            // when TextureRaw was added: the array still had 7 entries, the intent selected index 7,
+            // and the Spinner's ArrayAdapter.getItem threw ArrayIndexOutOfBoundsException while
+            // laying out -- a crash on the UI thread, not a mislabelled row.
+            _kind.Adapter = new ArrayAdapter<string>(this, Android.Resource.Layout.SimpleSpinnerDropDownItem,
+                                                     Enum.GetNames(typeof(ExportKind)));
             root.AddView(new TextView(this) { Text = "Export kind" });
             root.AddView(_kind);
 
@@ -211,18 +217,9 @@ namespace AssetStudioMobile
                 case "export":
                 {
                     // Optional: point the run at a directory without touching the UI field.
+                    // Resolved off the UI thread, with the same Shizuku fallback the Load button
+                    // uses, so this works on a game's own Android/data directory too.
                     var exportPath = intent.GetStringExtra("path");
-                    if (!string.IsNullOrWhiteSpace(exportPath))
-                    {
-                        var problem = StorageAccess.ValidateReadableDirectory(exportPath);
-                        if (problem != null)
-                        {
-                            Append($"ERROR: {exportPath}: {problem}");
-                            break;
-                        }
-                        _inputDir = Path.GetFullPath(exportPath.Trim());
-                        _inputPath.Text = _inputDir;
-                    }
 
                     var kindName = intent.GetStringExtra("kind");
                     var idx = 0;
@@ -233,11 +230,21 @@ namespace AssetStudioMobile
                     if (intent.GetBooleanExtra("overwrite", false)) _overwrite.Checked = true;
 
                     // Scan() reads the kind off the spinner to decide which object types to build,
-                    // so the spinner has to agree with what was asked for here.
-                    _kind.SetSelection(idx);
+                    // so the spinner has to agree with what was asked for here. Clamped: an index
+                    // past the end of the adapter is a crash, and an unknown kind name used to
+                    // produce exactly that.
+                    _kind.SetSelection(Math.Min(idx, _kind.Adapter.Count - 1));
 
                     RunOnBackground(() =>
                     {
+                        if (!string.IsNullOrWhiteSpace(exportPath))
+                        {
+                            var readable = ResolveReadable(exportPath);
+                            if (readable == null) return;
+                            _inputDir = readable;
+                            RunOnUiThread(() => _inputPath.Text = readable);
+                        }
+
                         // Each `am start` is a fresh process, so an export launched this way has
                         // no loaded assets unless we scan first.
                         if (_extractor == null) Scan();
@@ -295,39 +302,54 @@ namespace AssetStudioMobile
 
             RunOnBackground(() =>
             {
-                var full = typed.Trim();
-                try { full = Path.GetFullPath(full); } catch { /* keep the raw text for the error */ }
-
-                var problem = StorageAccess.ValidateReadableDirectory(full);
-                if (problem == null)
-                {
-                    _inputDir = full;
-                    RunOnUiThread(() => _inputPath.Text = full);
-                    Scan();
-                    return;
-                }
-
-                Append($"{full}: {problem}");
-                Append("all-files access does not cover /sdcard/Android/data; trying Shizuku...");
-
-                if (ShizukuBridge.State != ShizukuState.Ready)
-                {
-                    Append($"ERROR: cannot read it, and Shizuku is not usable ({ShizukuBridge.State}). " +
-                           "Copy the game's files to /sdcard/Download first.");
-                    SetStatus("cannot read, and Shizuku unavailable");
-                    return;
-                }
-
-                // Stage into our own EXTERNAL app dir, not FilesDir: the Shizuku service runs as
-                // uid 2000 and cannot write into /data/user/0/<pkg>, which is the app's private
-                // sandbox. The external dir is writable by shell (ext_data_rw) and by us.
-                var externalRoot = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
-                var staging = Path.Combine(externalRoot, "staged");
-                var staged = ShizukuBridge.StageDirectory(full, staging, Append, (c, t) => Report(c, t));
-                _inputDir = staged;
-                RunOnUiThread(() => _inputPath.Text = staged);
+                var readable = ResolveReadable(typed);
+                if (readable == null) return;
+                _inputDir = readable;
+                RunOnUiThread(() => _inputPath.Text = readable);
                 Scan();
             });
+        }
+
+        /// <summary>
+        /// Turns a supplied path into one this app can actually read, staging through Shizuku when
+        /// it points into somebody else's Android/data. Runs off the UI thread; returns null when
+        /// it cannot be made readable.
+        ///
+        /// Both entry points need this. The scripted `export` action used to validate and give up
+        /// instead, so `am start -e action export -e path /sdcard/Android/data/...` failed with a
+        /// permission error even though the same directory worked through the UI -- which is
+        /// exactly how it was found.
+        /// </summary>
+        private string ResolveReadable(string path)
+        {
+            var full = path?.Trim() ?? "";
+            if (full.Length == 0)
+            {
+                Append("ERROR: no path given");
+                return null;
+            }
+            try { full = Path.GetFullPath(full); } catch { /* keep the raw text for the error */ }
+
+            var problem = StorageAccess.ValidateReadableDirectory(full);
+            if (problem == null) return full;
+
+            Append($"{full}: {problem}");
+            Append("all-files access does not cover /sdcard/Android/data; trying Shizuku...");
+
+            if (ShizukuBridge.State != ShizukuState.Ready)
+            {
+                Append($"ERROR: cannot read it, and Shizuku is not usable ({ShizukuBridge.State}). " +
+                       "Copy the game's files to /sdcard/Download first.");
+                SetStatus("cannot read, and Shizuku unavailable");
+                return null;
+            }
+
+            // Stage into our own EXTERNAL app dir, not FilesDir: the Shizuku service runs as
+            // uid 2000 and cannot write into /data/user/0/<pkg>, which is the app's private
+            // sandbox. The external dir is writable by shell (ext_data_rw) and by us.
+            var externalRoot = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
+            var staging = Path.Combine(externalRoot, "staged");
+            return ShizukuBridge.StageDirectory(full, staging, Append, (c, t) => Report(c, t));
         }
 
         // ---------------- SAF import ----------------
