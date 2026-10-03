@@ -18,6 +18,14 @@ namespace AssetStudio
                 NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
                 ReferenceHandler = ReferenceHandler.IgnoreCycles,
                 IncludeFields = true,
+
+                // Without this, serialising the type tree throws on any object whose tree nests a
+                // dictionary and every such object is dropped. See the converter for the details.
+                Converters =
+                {
+                    new JsonConverterHelper.OrderedDictionaryConverter(),
+                    new JsonConverterHelper.KeyValuePairObjectConverter(),
+                },
             };
         }
 
