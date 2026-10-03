@@ -182,6 +182,7 @@ namespace AssetStudioMobile
             // (AssetStudioGUIForm.cs:2545) and the CLI as --avoid-typetree; this makes it
             // switchable from adb so the two can be measured on the same device.
             if (intent.HasExtra("typetree")) Extractor.UseTypeTree = intent.GetBooleanExtra("typetree", true);
+            if (intent.HasExtra("pnglevel")) Extractor.PngLevel = intent.GetIntExtra("pnglevel", 1);
 
             switch (action.ToLowerInvariant())
             {

@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using AssetStudio;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace AssetStudioMobile
 {
@@ -99,6 +100,9 @@ namespace AssetStudioMobile
         /// each keeps the total in flight near what a single worker used to hold.
         /// </summary>
         private const long BatchBytes = 32L * 1024 * 1024;
+
+        /// <summary>zlib level for the native PNG writer; 1 is the speed setting.</summary>
+        public static int PngLevel = 1;
 
         /// <summary>How many failure messages an export keeps, so one bad batch cannot fill memory.</summary>
         private const int MaxReportedErrors = 100;
@@ -596,6 +600,7 @@ namespace AssetStudioMobile
 
             LogInfo($"read {LoadedFiles} serialized file(s), {LoadedObjects} object(s) total");
             Finish(report);
+            LogInfo(Stats.Report());
             return report;
         }
 
@@ -785,7 +790,13 @@ namespace AssetStudioMobile
                     return new ExportPlan
                     {
                         Extension = ".png",
-                        Write = (obj, dest, opt) => WriteImage(((Texture2D)obj).ConvertToImage(opt.FlipTextures), dest, opt),
+                        Write = (obj, dest, opt) =>
+                        {
+                            var t0 = Stopwatch.GetTimestamp();
+                            var image = ((Texture2D)obj).ConvertToImage(opt.FlipTextures);
+                            Stats.AddTexture(Stopwatch.GetTimestamp() - t0, (long)tex.m_Width * tex.m_Height);
+                            WriteImage(image, dest, opt);
+                        },
                     };
 
                 case Sprite sprite when sprite.m_Rect.width > 0 && sprite.m_Rect.height > 0:
@@ -877,10 +888,24 @@ namespace AssetStudioMobile
                 throw new InvalidOperationException("texture decode returned no image (unsupported format?)");
 
             using (image)
-            using (var fs = File.Create(dest))
             {
-                if (options.ImageFormat == ImageFormat.Png) image.Save(fs, FastPng());
-                else image.WriteToStream(fs, options.ImageFormat);
+                var t0 = Stopwatch.GetTimestamp();
+
+                // Native first: same Paeth filtering and the same zlib format, but a real optimised
+                // deflate instead of ImageSharp's managed one. Falls through if the write fails.
+                if (options.ImageFormat == ImageFormat.Png && image is Image<Bgra32> bgra && PngNative.Available
+                    && PngNative.TryWrite(dest, bgra, PngLevel))
+                {
+                    Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
+                    return;
+                }
+
+                using (var fs = File.Create(dest))
+                {
+                    if (options.ImageFormat == ImageFormat.Png) image.Save(fs, FastPng());
+                    else image.WriteToStream(fs, options.ImageFormat);
+                }
+                Stats.AddEncode(Stopwatch.GetTimestamp() - t0);
             }
         }
 

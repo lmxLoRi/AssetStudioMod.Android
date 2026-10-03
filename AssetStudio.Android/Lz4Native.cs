@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using AssetStudio;
 
@@ -31,6 +32,18 @@ namespace AssetStudioMobile
             }
         }
 
-        public static void Install() => BundleDecompressionHelper.Lz4Decoder = Decode;
+        /// <summary>
+        /// What gets installed. Records the time spent, because the decoded byte count is large
+        /// enough that "it feels fast" is not evidence, and the number has to be checkable.
+        /// </summary>
+        public static int DecodeTimed(ReadOnlySpan<byte> source, Span<byte> destination)
+        {
+            var t0 = Stopwatch.GetTimestamp();
+            var written = Decode(source, destination);
+            Stats.AddLz4(Stopwatch.GetTimestamp() - t0, source.Length);
+            return written;
+        }
+
+        public static void Install() => BundleDecompressionHelper.Lz4Decoder = DecodeTimed;
     }
 }
