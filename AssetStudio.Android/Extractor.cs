@@ -87,8 +87,18 @@ namespace AssetStudioMobile
         /// and can be several times larger. Both are deliberately well under what the device has
         /// (the 4.1 GB cache becomes ~64 batches and ~64 MB in flight at a time).
         /// </summary>
-        private const int BatchFiles = 128;
-        private const long BatchBytes = 64L * 1024 * 1024;
+        private const int BatchFiles = 64;
+
+        /// <summary>
+        /// Input bytes one worker may hold at a time.
+        ///
+        /// This is a *per worker* budget, so it has to come down as workers go up: ReadAssets turns a
+        /// batch into roughly five times its size in live objects, and with four workers the old
+        /// 64 MB each put 2.0 GB of private memory in the process (measured), which is both a
+        /// danger on a smaller device and the likely reason four workers only bought 1.4x. 32 MB
+        /// each keeps the total in flight near what a single worker used to hold.
+        /// </summary>
+        private const long BatchBytes = 32L * 1024 * 1024;
 
         /// <summary>How many failure messages an export keeps, so one bad batch cannot fill memory.</summary>
         private const int MaxReportedErrors = 100;
@@ -98,9 +108,8 @@ namespace AssetStudioMobile
         ///
         /// One worker per batch: a batch is loaded once and then written, so the load of one
         /// overlaps the encode of another. This is a memory budget as much as a CPU one -- every
-        /// worker holds its own batch of loaded objects, plus a decoded image (4 MB for 1024x1024
-        /// Bgra32, 16 MB for 2048x2048) per asset it is writing. Half the cores keeps the phone's
-        /// big cores busy without putting four heavy batches in memory at once.
+        /// worker holds its own batch of loaded objects (see BatchBytes) plus a decoded image, 4 MB
+        /// for 1024x1024 Bgra32 and 16 MB for 2048x2048, per asset it is writing.
         /// </summary>
         private static readonly int ExportThreads = Math.Max(2, Environment.ProcessorCount / 2);
 
@@ -134,6 +143,9 @@ namespace AssetStudioMobile
 
         /// <summary>The kind this instance was loaded for; see <see cref="FilterFor"/>.</summary>
         public ExportKind LoadedKind { get; private set; }
+
+        /// <summary>How many files the scan decided were Unity data.</summary>
+        public int CandidateCount => _candidates?.Count ?? 0;
 
         /// <summary>
         /// AssetsManager.LoadViaTypeTree, which the GUI and CLI both expose.
@@ -253,32 +265,14 @@ namespace AssetStudioMobile
             }
             else
             {
-                // Too big to hold. Read through it once so the counts are real, dropping each batch
-                // before opening the next; Export reads it again, one batch at a time.
-                //
-                // Across workers, because a batch is independent and one AssetsManager cannot load
-                // two of them. This is the same pass the export then repeats, so it is the most
-                // expensive thing in the app and the one worth spending cores on.
-                var list = _candidates;
-                LogInfo($"too large to hold in one go: reading {batches.Count} batches on {ExportThreads} thread(s)");
-                var done = 0;
-
-                Parallel.ForEach(batches,
-                    new ParallelOptions { MaxDegreeOfParallelism = ExportThreads },
-                    NewWorker,
-                    (batch, loopState, worker) =>
-                    {
-                        LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var f, out var o);
-                        Interlocked.Add(ref _loadedFiles, f);
-                        Interlocked.Add(ref _loadedObjects, o);
-                        worker.Manager.Clear();
-                        Report(Interlocked.Add(ref done, batch.Count), list.Count);
-                        return worker;
-                    },
-                    worker => worker.Dispose());
-
+                // Deliberately not read here. Export has to read every batch anyway, and reading it
+                // twice was the single most expensive thing the app did: the extra pass measured
+                // ~97s of a 492s run on the 4.1 GB cache, purely to put two numbers on the status
+                // line before the real work had started. Export accumulates and reports them
+                // instead, so they still appear -- just when they are actually known.
                 _released = true;
-                LogInfo($"Loaded {LoadedFiles} serialized file(s), {LoadedObjects} object(s) total");
+                LogInfo($"{_candidates.Count} candidate file(s) in {batches.Count} batches, " +
+                        $"loaded during export (at most {BatchFiles} files or {BatchBytes / (1024 * 1024)} MB each)");
             }
 
             LogInfo($"load {clock.ElapsedMilliseconds} ms");
@@ -588,7 +582,9 @@ namespace AssetStudioMobile
                 NewWorker,
                 (batch, loopState, worker) =>
                 {
-                    LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var _, out var _);
+                    LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var f, out var o);
+                    Interlocked.Add(ref _loadedFiles, f);
+                    Interlocked.Add(ref _loadedObjects, o);
                     var targets = CollectTargets(worker.Manager, options);
                     var fragment = WriteTargets(targets, outputRoot, options, false, claimed);
                     lock (report) Merge(report, fragment);
@@ -598,6 +594,7 @@ namespace AssetStudioMobile
                 },
                 worker => worker.Dispose());
 
+            LogInfo($"read {LoadedFiles} serialized file(s), {LoadedObjects} object(s) total");
             Finish(report);
             return report;
         }

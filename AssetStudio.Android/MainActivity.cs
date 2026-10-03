@@ -64,6 +64,9 @@ namespace AssetStudioMobile
 
             Logger.Default = new AndroidLogger(this);
 
+            // Every bundle block is LZ4; the managed codec has no SIMD path on ARM64.
+            Lz4Native.Install();
+
             SetContentView(BuildUi());
             _inputPath.Text = _inputDir;
             _outputPath.Text = _outputDir;
@@ -409,7 +412,14 @@ namespace AssetStudioMobile
 
             // The kind decides which object types are worth building; see Extractor.FilterFor.
             _extractor.Load(_inputDir, (ExportKind)_kind.SelectedItemPosition);
-            SetStatus($"{_extractor.LoadedFiles} file(s), {_extractor.LoadedObjects} object(s) loaded");
+
+            // A tree too big to hold is not read until Export asks for it, so there are no object
+            // counts to show yet, only what the scan recognised.
+            SetStatus(_extractor.CandidateCount == 0
+                ? "No Unity files found"
+                : _extractor.LoadedObjects > 0
+                    ? $"{_extractor.LoadedFiles} file(s), {_extractor.LoadedObjects} object(s) loaded"
+                    : $"{_extractor.CandidateCount} candidate file(s) -- will be read on export");
         }
 
         private void Export(int kindIndex, bool overwrite)
