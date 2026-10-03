@@ -197,6 +197,21 @@ First, use [Il2CppDumper](https://github.com/Perfare/Il2CppDumper) to generate d
 * Visual Studio 2022 or newer
 * **AssetStudioFBXNative** uses [FBX SDK 2020.2.1](https://www.autodesk.com/developer-network/platform-technologies/fbx-sdk-2020-2-1), before building, you need to install the FBX SDK and modify the project file, change include directory and library directory to point to the FBX SDK directory
 
+### Android
+
+`AssetStudio.Android` targets `net10.0-android` and reuses the existing libraries without
+modifications. It is built standalone rather than through the solution, because the Windows CI
+restores the solution with `nuget restore` and has no `android` workload available.
+
+```bash
+dotnet workload install android
+dotnet publish AssetStudio.Android/AssetStudio.Android.csproj -c Release
+```
+
+`Texture2DDecoderNative` must first be cross-compiled with the Android NDK; see
+[AssetStudio.Android/README.md](AssetStudio.Android/README.md) for the full instructions, the
+list of unsupported features (FBX, FMOD audio, Oodle) and the known limitations.
+
 ## Open source libraries used
 
 ### Texture2DDecoder

@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFrameworks>net472;net8.0;net8.0-windows;net9.0;net9.0-windows</TargetFrameworks>
+        <TargetFrameworks>net472;net8.0;net8.0-windows;net9.0;net9.0-windows;net10.0-android</TargetFrameworks>
+        <SupportedOSPlatformVersion Condition=" $(TargetFramework.EndsWith('-android')) ">24</SupportedOSPlatformVersion>
         <Version>0.19.0.0</Version>
         <Copyright>Copyright © Perfare 2018-2022; Copyright © aelurum 2021-2025</Copyright>
         <DebugType>embedded</DebugType>
@@ -12,12 +13,12 @@
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     </ItemGroup>
 
-    <ItemGroup Condition=" !$(TargetFramework.Contains('windows')) ">
+    <ItemGroup Condition=" !$(TargetFramework.Contains('windows')) AND !$(TargetFramework.EndsWith('-android')) ">
         <PackageReference Include="Kyaru.Texture2DDecoder.Linux" Version="0.1.0" />
         <PackageReference Include="Kyaru.Texture2DDecoder.macOS" Version="0.1.0" />
     </ItemGroup>
     
-    <ItemGroup Condition=" '$(TargetFramework)' != 'net472' ">
+    <ItemGroup Condition=" '$(TargetFramework)' != 'net472' AND !$(TargetFramework.EndsWith('-android')) ">
         <PackageReference Include="Kyaru.Texture2DDecoder.Windows" Version="0.1.0" />
         <PackageReference Include="Kyaru.Texture2DDecoder">
             <Version>0.17.0</Version>
@@ -25,18 +26,35 @@
         <PackageReference Include="SixLabors.ImageSharp.Drawing" Version="2.1.6" />
     </ItemGroup>
 
+    <!-- Android has no Kyaru-published native assets, so use our own Texture2DDecoderWrapper
+         and ship libTexture2DDecoderNative.so in jniLibs (see AssetStudio.Android/README.md). -->
+    <ItemGroup Condition=" $(TargetFramework.EndsWith('-android')) ">
+        <PackageReference Include="SixLabors.ImageSharp.Drawing" Version="2.1.6" />
+    </ItemGroup>
+
     <ItemGroup Condition=" '$(TargetFramework)' == 'net472' ">
         <PackageReference Include="SixLabors.ImageSharp.Drawing" Version="1.0.0-beta15" />
     </ItemGroup>
 
+    <ItemGroup Condition=" !$(TargetFramework.EndsWith('-android')) ">
+        <ProjectReference Include="..\AssetStudioFBXWrapper\AssetStudioFBXWrapper.csproj" />
+    </ItemGroup>
     <ItemGroup>
         <ProjectReference Include="..\AssetStudio.PInvoke\AssetStudio.PInvoke.csproj" />
-        <ProjectReference Include="..\AssetStudioFBXWrapper\AssetStudioFBXWrapper.csproj" />
         <ProjectReference Include="..\AssetStudio\AssetStudio.csproj" />
     </ItemGroup>
     
-    <ItemGroup Condition=" '$(TargetFramework)' == 'net472' ">
+    <ItemGroup Condition=" '$(TargetFramework)' == 'net472' OR $(TargetFramework.EndsWith('-android')) ">
         <ProjectReference Include="..\Texture2DDecoderWrapper\Texture2DDecoderWrapper.csproj" />
+    </ItemGroup>
+
+    <!-- Autodesk's FBX SDK has no Android/arm64 build, so the FBX export path is dropped on
+         Android. ModelExporter is the only public entry point into AssetStudioFBXWrapper, and
+         ModelConverter only exists to feed it (its one Fbx.* call, QuaternionToEuler, is itself
+         a P/Invoke into AssetStudioFBXNative). Nothing else in this library uses either. -->
+    <ItemGroup Condition=" $(TargetFramework.EndsWith('-android')) ">
+        <Compile Remove="ModelExporter.cs" />
+        <Compile Remove="ModelConverter.cs" />
     </ItemGroup>
 
 </Project>

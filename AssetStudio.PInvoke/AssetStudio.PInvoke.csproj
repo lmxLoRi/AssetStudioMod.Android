@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net472;net8.0;net8.0-windows;net9.0;net9.0-windows</TargetFrameworks>
+    <TargetFrameworks>net472;net8.0;net8.0-windows;net9.0;net9.0-windows;net10.0-android</TargetFrameworks>
+    <SupportedOSPlatformVersion Condition=" $(TargetFramework.EndsWith('-android')) ">24</SupportedOSPlatformVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Version>0.19.0.0</Version>
     <Copyright>Copyright © Perfare 2020-2022; Copyright © hozuki 2020</Copyright>

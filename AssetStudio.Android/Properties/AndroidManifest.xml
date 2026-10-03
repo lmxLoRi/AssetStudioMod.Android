@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application android:allowBackup="true"
+               android:icon="@mipmap/appicon"
+               android:label="@string/app_name"
+               android:roundIcon="@mipmap/appicon_round"
+               android:supportsRtl="true" />
+
+  <!-- Bundles are read through the Storage Access Framework (ACTION_OPEN_DOCUMENT_TREE) and
+       copied into app-private storage, so no broad storage permission is required. This
+       keeps the app inside ordinary Play Store policy; MANAGE_EXTERNAL_STORAGE is not used. -->
+  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+                   android:maxSdkVersion="32" />
+</manifest>

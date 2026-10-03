@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string-array name="export_kinds">
+    <item>Texture2D</item>
+    <item>Sprite</item>
+    <item>JsonDump</item>
+    <item>TextAsset</item>
+    <item>RawData</item>
+  </string-array>
+</resources>

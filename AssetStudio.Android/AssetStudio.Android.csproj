@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-android</TargetFramework>
+    <SupportedOSPlatformVersion>26</SupportedOSPlatformVersion>
+    <OutputType>Exe</OutputType>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <ApplicationId>com.aelurum.assetstudiomod</ApplicationId>
+    <ApplicationVersion>1</ApplicationVersion>
+    <ApplicationDisplayVersion>0.19.0</ApplicationDisplayVersion>
+    <RootNamespace>AssetStudioMobile</RootNamespace>
+
+    <!-- partial, not full: System.Text.Json + MakeGenericType are used reflectively for
+         typetree/MonoBehaviour dumps and full trimming silently removes them (IL2026). -->
+    <TrimMode>partial</TrimMode>
+    <AndroidLinkMode>SdkOnly</AndroidLinkMode>
+    <RunAOTCompilation>false</RunAOTCompilation>
+
+    <!-- AssetStudio.dll's Brotli dictionary and the vendored 7-Zip decoder blow past the
+         default 15 KB warning threshold; nothing actionable here. -->
+    <NoWarn>$(NoWarn);CS1570;CS8981</NoWarn>
+    <AndroidEnableProfiledAot>false</AndroidEnableProfiledAot>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AssetStudio\AssetStudio.csproj" />
+    <ProjectReference Include="..\AssetStudioUtility\AssetStudioUtility.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -381,14 +381,13 @@ namespace crnd
 
    const uint32 cIntBits = 32U;
 
-#ifdef _WIN64
+// A pointer is wider than 32 bits on every 64-bit target, not just x86-64 and Win64.
+// Testing the architecture macros instead of the pointer width made this typedef uint32 on
+// aarch64 (Android arm64-v8a, Apple silicon), truncating every pointer in crnd_realloc.
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__) || defined(__LP64__) || (UINTPTR_MAX > 0xFFFFFFFFu)
    typedef uint64 ptr_bits;
 #else
-   #ifdef __x86_64__
-      typedef uint64 ptr_bits;
-   #else
-      typedef uint32 ptr_bits;
-   #endif
+   typedef uint32 ptr_bits;
 #endif
 
    template<typename T> struct int_traits { enum { cMin = crnd::cINT32_MIN, cMax = crnd::cINT32_MAX, cSigned = true }; };
