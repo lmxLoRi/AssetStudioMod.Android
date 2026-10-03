@@ -1,0 +1,17 @@
+[package]
+name = "rust-png-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+png = "0.17"
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+
+[features]
+# Swaps the pure-Rust deflate (miniz_oxide) for the same C zlib the current
+# encoder links, so "Rust" and "a different deflate" can be told apart.
+czlib = ["flate2/zlib"]
+
+[profile.release]
+opt-level = 3
+lto = true
