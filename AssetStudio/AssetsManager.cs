@@ -21,7 +21,11 @@ namespace AssetStudio
         public readonly List<Action<OptionsFile>> OptionLoaders = new List<Action<OptionsFile>>();
         public readonly List<SerializedFile> AssetsFileList = new List<SerializedFile>();
 
-        internal Dictionary<string, int> assetsFileIndexCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Concurrent: PPtr.TryGetAssetsFile resolves external references lazily and caches the
+        // index, which is the read path an export runs on. The GUI and CLI parallel exporters, and
+        // the Android app, all resolve PPtrs from several threads at once, so a plain Dictionary
+        // here means two threads can miss and then Add the same key concurrently.
+        internal ConcurrentDictionary<string, int> assetsFileIndexCache = new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal ConcurrentDictionary<string, BinaryReader> resourceFileReaders = new ConcurrentDictionary<string, BinaryReader>(StringComparer.OrdinalIgnoreCase);
 
         private readonly List<string> importFiles = new List<string>();

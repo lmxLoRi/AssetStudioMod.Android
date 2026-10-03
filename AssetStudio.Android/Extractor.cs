@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -8,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using AssetStudio;
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Formats.Png;
 
 namespace AssetStudioMobile
 {
@@ -90,6 +92,16 @@ namespace AssetStudioMobile
 
         /// <summary>How many failure messages an export keeps, so one bad batch cannot fill memory.</summary>
         private const int MaxReportedErrors = 100;
+
+        /// <summary>
+        /// How many assets are decoded, encoded and written at once.
+        ///
+        /// This is a memory budget as much as a CPU one: every asset in flight holds a decoded
+        /// image (4 MB for 1024x1024 Bgra32, 16 MB for 2048x2048) plus the encoder's buffers, on
+        /// top of the load batch that is already resident. Half the cores leaves the phone's big
+        /// cores for this and still gives most of the win.
+        /// </summary>
+        private static readonly int ExportThreads = Math.Max(2, Environment.ProcessorCount / 2);
 
         /// <summary>Every file the scan decided was Unity data, in path order.</summary>
         private List<Candidate> _candidates;
@@ -507,54 +519,125 @@ namespace AssetStudioMobile
         /// Writes one batch's assets into <paramref name="report"/>, which accumulates across
         /// batches. <paramref name="perAssetProgress"/> is false when the caller drives the bar
         /// itself at file granularity instead.
+        ///
+        /// Runs several assets at once: the work is one independent decode, encode and file write
+        /// per asset, and serially it left seven of the phone's eight cores idle while the PNG
+        /// encoder saturated one (measured: 101% of a single core for the whole export).
         /// </summary>
         private void WriteTargets(List<AssetStudio.Object> targets, string outputRoot, ExportOptions options,
                                   ExportReport report, bool perAssetProgress)
         {
-            report.Matched += targets.Count;
+            var tally = new Tally();
+            var byType = new Dictionary<string, int>(StringComparer.Ordinal);
+            var unexported = new Dictionary<string, int>(StringComparer.Ordinal);
+            var errors = new List<string>();
+
+            // Every thread tallies locally and the results are merged after the loop, so nothing in
+            // the hot path takes a lock. The one thing that genuinely needs one is the set of file
+            // names already spoken for.
+            var claimed = new ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
 
             foreach (var g in targets.GroupBy(o => o.type.ToString()))
             {
-                report.ByType[g.Key] = Get(report.ByType, g.Key) + g.Count();
+                byType[g.Key] = Get(byType, g.Key) + g.Count();
             }
 
-            var done = 0;
-            foreach (var obj in targets)
+            void Fail(AssetStudio.Object obj, Exception ex)
             {
-                var plan = Plan(obj, options);
-                if (plan == null)
+                Interlocked.Increment(ref tally.Failed);
+                var msg = $"{DisplayName(obj)} ({obj.type}): {ex.GetType().Name}: {ex.Message}";
+
+                // Capped: a batch of assets sharing one failure mode can produce thousands of
+                // messages, and every one of them is a live string plus a UI post.
+                lock (errors)
                 {
-                    var typeName = obj.type.ToString();
-                    report.Unexported[typeName] = Get(report.Unexported, typeName) + 1;
+                    if (errors.Count >= MaxReportedErrors) return;
+                    errors.Add(msg);
                 }
-                else
+                LogWarn(msg);
+            }
+
+            Parallel.ForEach(targets,
+                new ParallelOptions { MaxDegreeOfParallelism = ExportThreads },
+                obj =>
                 {
-                    var dest = Path.Combine(outputRoot, DisplayName(obj) + plan.Extension);
+                    Interlocked.Increment(ref tally.Matched);
+
+                    ExportPlan plan;
                     try
                     {
-                        if (File.Exists(dest) && !options.Overwrite)
-                        {
-                            report.Skipped++;
-                        }
-                        else
-                        {
-                            plan.Write(obj, dest, options);
-                            report.Exported++;
-                        }
+                        plan = Plan(obj, options);
                     }
                     catch (Exception ex)
                     {
-                        report.Failed++;
-                        var msg = $"{DisplayName(obj)} ({obj.type}): {ex.GetType().Name}: {ex.Message}";
-                        // Capped: a batch full of assets that share one failure mode can produce
-                        // thousands of messages, and every one of them is a live string.
-                        if (report.Errors.Count < MaxReportedErrors) report.Errors.Add(msg);
-                        LogWarn(msg);
+                        Fail(obj, ex);
+                        if (perAssetProgress) Report(Interlocked.Increment(ref tally.Done), targets.Count);
+                        return;
                     }
-                }
 
-                if (perAssetProgress) Report(++done, targets.Count);
+                    if (plan == null)
+                    {
+                        var typeName = obj.type.ToString();
+                        lock (unexported) unexported[typeName] = Get(unexported, typeName) + 1;
+                    }
+                    else
+                    {
+                        var dest = Path.Combine(outputRoot, DisplayName(obj) + plan.Extension);
+
+                        // Two bundles can hold different assets with the same name and pathID. One
+                        // file cannot hold both, so the first claim wins: serially the last write
+                        // won by accident, and letting two threads write the same path at the same
+                        // time would interleave them into a corrupt file.
+                        if (!claimed.TryAdd(dest, true))
+                        {
+                            Interlocked.Increment(ref tally.Skipped);
+                        }
+                        else
+                        {
+                            try
+                            {
+                                if (File.Exists(dest) && !options.Overwrite)
+                                {
+                                    Interlocked.Increment(ref tally.Skipped);
+                                }
+                                else
+                                {
+                                    plan.Write(obj, dest, options);
+                                    Interlocked.Increment(ref tally.Exported);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Fail(obj, ex);
+                            }
+                        }
+                    }
+
+                    if (perAssetProgress) Report(Interlocked.Increment(ref tally.Done), targets.Count);
+                });
+
+            report.Matched += tally.Matched;
+            report.Exported += tally.Exported;
+            report.Skipped += tally.Skipped;
+            report.Failed += tally.Failed;
+
+            foreach (var kv in byType) report.ByType[kv.Key] = Get(report.ByType, kv.Key) + kv.Value;
+            foreach (var kv in unexported) report.Unexported[kv.Key] = Get(report.Unexported, kv.Key) + kv.Value;
+
+            foreach (var e in errors)
+            {
+                if (report.Errors.Count >= MaxReportedErrors) break;
+                report.Errors.Add(e);
             }
+        }
+
+        private sealed class Tally
+        {
+            public int Matched;
+            public int Exported;
+            public int Skipped;
+            public int Failed;
+            public int Done;
         }
 
         /// <summary>One summary for the whole run, rather than one per batch.</summary>
@@ -703,9 +786,32 @@ namespace AssetStudioMobile
             using (image)
             using (var fs = File.Create(dest))
             {
-                image.WriteToStream(fs, options.ImageFormat);
+                if (options.ImageFormat == ImageFormat.Png) image.Save(fs, FastPng());
+                else image.WriteToStream(fs, options.ImageFormat);
             }
         }
+
+        /// <summary>
+        /// PNG settings picked by measurement, because the default is the worst possible choice for
+        /// a bulk export on a phone.
+        ///
+        /// ImageSharp defaults to FilterMethod.Adaptive, which computes all five filters for every
+        /// scanline and keeps the smallest, at CompressionLevel.DefaultCompression. The encode is
+        /// ~99% of the per-asset cost (decode and flip together are under 1%), so its settings are
+        /// the settings for the whole export. Measured on one 860x730 texture:
+        ///
+        ///     Adaptive + level 6 (the default)   211 ms   736 KB
+        ///     None     + level 1                  48 ms   977 KB
+        ///     Paeth    + level 1                  44 ms   848 KB
+        ///
+        /// Paeth at low effort is both faster and smaller than no filter at all, so there is no
+        /// reason to give the compression up: ~4.5x the speed for ~15% more bytes.
+        /// </summary>
+        private static PngEncoder FastPng() => new PngEncoder
+        {
+            FilterMethod = PngFilterMethod.Paeth,
+            CompressionLevel = PngCompressionLevel.Level1,
+        };
 
         /// <summary>
         /// Human-readable name for an asset.
