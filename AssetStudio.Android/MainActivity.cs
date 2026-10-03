@@ -103,7 +103,7 @@ namespace AssetStudioMobile
             inputRow.AddView(loadBtn);
             root.AddView(inputRow);
 
-            _btnImport = new Button(this) { Text = "Pick folder (copies files)" };
+            _btnImport = new Button(this) { Text = "Pick folder" };
             _btnImport.Click += (_, __) => PickTree();
             root.AddView(_btnImport);
 
@@ -404,10 +404,30 @@ namespace AssetStudioMobile
 
         private void ImportTree(Android.Net.Uri uri)
         {
+            // A picked tree is a content:// URI, but for the file-manager provider it names a real
+            // path. Resolving it puts a picked folder on the same routes as a typed-in one --
+            // read in place, or staged with Shizuku when it belongs to another app -- instead of
+            // always paying for a byte-by-byte copy through the provider. The copy stays as the
+            // fallback for providers that name nothing on disk.
+            var picked = SafPaths.ToFileSystemPath(uri);
+            if (picked != null)
+            {
+                Append($"picked {picked}");
+                var readable = ResolveReadable(picked);
+                if (readable != null)
+                {
+                    _inputDir = readable;
+                    RunOnUiThread(() => _inputPath.Text = readable);
+                    Scan(); // feature 4: load straight after the directory is chosen
+                    return;
+                }
+                Append("that path is not usable, so copying through the document provider instead");
+            }
+
             Append($"Importing {uri} ...");
             var copied = ImportUtils.CopyTree(this, uri, _inputDir, Append, (c, t) => Report(c, t));
             Append($"Imported {copied} file(s) into {_inputDir}");
-            _inputPath.Text = _inputDir;
+            RunOnUiThread(() => _inputPath.Text = _inputDir);
             Scan(); // feature 4: load straight after the directory is chosen
         }
 
