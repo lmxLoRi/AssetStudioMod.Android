@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using AssetStudio;
 using SixLabors.ImageSharp;
 
@@ -89,54 +92,233 @@ namespace AssetStudioMobile
 
             var full = Path.GetFullPath(root);
             LogInfo($"Scanning {full}");
-            var candidates = Directory.GetFiles(full, "*.*", SearchOption.AllDirectories)
-                .Where(IsCandidateUnityFile)
-                .ToList();
-            LogInfo($"{candidates.Count} candidate file(s)");
+
+            var clock = Stopwatch.StartNew();
+
+            // 1. Walk. One pass of readdir plus a stat per entry: linear, and parallelising it
+            //    only adds contention on the same directory inode.
+            var everything = Directory.GetFiles(full, "*.*", SearchOption.AllDirectories);
+            var walkMs = clock.ElapsedMilliseconds;
+            clock.Restart();
+
+            // 2. Decide by header, not by name. The loader already identifies files by content in
+            //    FileReader.CheckFileType, so the pre-filter has to agree with it, and an extension
+            //    list cannot. A game directory is mostly extensionless files: an Addressables
+            //    cache, for one, is ~4900 __data bundles interleaved with ~4900 __info JSON
+            //    manifests. Those are identical extensionless shapes, so a name-based filter lets
+            //    every manifest through to be opened, sniffed and thrown away again.
+            var candidates = SniffCandidates(everything);
+            var sniffMs = clock.ElapsedMilliseconds;
+            clock.Restart();
+
+            LogInfo($"{candidates.Count} candidate file(s) of {everything.Length} " +
+                    $"(walk {walkMs} ms, sniff {sniffMs} ms, dropped {everything.Length - candidates.Count})");
             Report(0, candidates.Count);
 
-            // AssetsManager.LoadFilesAndFolders runs every entry through Path.GetFullPath, so it
-            // needs absolute paths. Relative names would silently resolve against the process
-            // working directory, which on Android is "/" and matches nothing.
-            // (It also clears the list it is given, hence the local.)
-            var paths = new List<string>(candidates);
-            _assetsManager.LoadFilesAndFolders(out var actualParent, paths);
-            LogInfo($"Loaded {_assetsManager.AssetsFileList.Count} serialized file(s), " +
-                    $"{CountAssets()} object(s) from {actualParent}");
-            Report(candidates.Count, candidates.Count);
-        }
-
-        private static bool IsCandidateUnityFile(string path)
-        {
+            // The loader reports per-file progress through this hook, and nothing else reports
+            // during a load. Without it, a directory this size just looks frozen.
+            // Fully qualified: this class has its own Progress field, which would otherwise win.
+            var previous = AssetStudio.Progress.Default;
+            AssetStudio.Progress.Default = new InlineProgress<int>(pct => Report(pct, 100));
             try
             {
-                if (new FileInfo(path).Length < 8) return false;
+                // AssetsManager.LoadFilesAndFolders runs every entry through Path.GetFullPath, so it
+                // needs absolute paths. Relative names would silently resolve against the process
+                // working directory, which on Android is "/" and matches nothing.
+                // (It also clears the list it is given, hence the local.)
+                var paths = new List<string>(candidates);
+                _assetsManager.LoadFilesAndFolders(out var actualParent, paths);
+                LogInfo($"Loaded {_assetsManager.AssetsFileList.Count} serialized file(s), " +
+                        $"{CountAssets()} object(s) from {actualParent}");
+            }
+            finally
+            {
+                AssetStudio.Progress.Default = previous;
+            }
+
+            LogInfo($"load {clock.ElapsedMilliseconds} ms");
+            Report(1, 1);
+        }
+
+        private const int HeaderLen = 1152; // the window FileReader reads for its own check
+
+        // Signatures copied from FileReader so the two agree on what a Unity file is. Duplicated
+        // rather than called because that type shares one static header buffer across instances
+        // (FileReader.headerBuff), so it cannot be used from several threads at once.
+        private static readonly byte[] GZipMagic = { 0x1f, 0x8b };
+        private static readonly byte[] BrotliMagic = { 0x62, 0x72, 0x6F, 0x74, 0x6C, 0x69 };
+        private static readonly byte[] ZipMagic = { 0x50, 0x4B, 0x03, 0x04 };
+        private static readonly byte[] ZipSpannedMagic = { 0x50, 0x4B, 0x07, 0x08 };
+        private static readonly byte[] UnityFsMagic = { 0x55, 0x6E, 0x69, 0x74, 0x79, 0x46, 0x53, 0x00 };
+
+        /// <summary>
+        /// Names that cannot be Unity data, so they are not even worth opening. A shortcut, not the
+        /// decision: everything it lets through is still judged by its header.
+        /// </summary>
+        private static readonly HashSet<string> HopelessNames = new(StringComparer.Ordinal)
+        {
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tga",
+            ".mp3", ".ogg", ".wav", ".ttf", ".otf",
+            ".dll", ".so", ".dat", ".db", ".sqlite", ".lck",
+            ".json", ".txt", ".xml", ".plist", ".yml", ".yaml", ".log", ".ver",
+        };
+
+        /// <summary>
+        /// Keeps the files the loader would actually do something with. A header the signatures do
+        /// not match becomes FileType.ResourceFile, which LoadFile disposes and moves straight past,
+        /// so dropping those here does not change what gets loaded -- only the time spent working
+        /// out that they never were going to load.
+        /// </summary>
+        private List<string> SniffCandidates(string[] files)
+        {
+            var kept = new List<string>(files.Length);
+            var gate = new object();
+            var seen = 0;
+
+            // The only part that fans out. Each file costs one short read, so this is dominated by
+            // open/close latency rather than CPU, which is what threads are good for. The load
+            // itself stays serial: AssetsManager is not thread safe.
+            Parallel.ForEach(files,
+                new ParallelOptions { MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount) },
+                () => new byte[HeaderLen],
+                (path, _, buffer) =>
+                {
+                    if (!HopelessNames.Contains(Path.GetExtension(path).ToLowerInvariant()) &&
+                        HasUnityHeader(path, buffer))
+                    {
+                        lock (gate) kept.Add(path);
+                    }
+
+                    // Throttled: one UI post per file would cost more than the reads do.
+                    if (Interlocked.Increment(ref seen) % 250 == 0) Report(seen, files.Length);
+                    return buffer;
+                },
+                _ => { });
+
+            kept.Sort(StringComparer.Ordinal); // Parallel.ForEach makes no order guarantee.
+            return kept;
+        }
+
+        /// <summary>
+        /// Mirrors AssetStudio.FileReader.CheckFileType. Every branch that returns something other
+        /// than ResourceFile is reproduced, so nothing the loader would act on gets dropped.
+        /// </summary>
+        private static bool HasUnityHeader(string path, byte[] buffer)
+        {
+            int len;
+            long size;
+            try
+            {
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite,
+                    4096, FileOptions.SequentialScan);
+                size = fs.Length;
+                if (size < 8) return false;
+
+                len = (int)Math.Min(HeaderLen, size);
+                var read = 0;
+                while (read < len)
+                {
+                    var n = fs.Read(buffer, read, len - read);
+                    if (n <= 0) break;
+                    read += n;
+                }
+                len = read;
             }
             catch
             {
                 return false;
             }
 
-            // Skip obvious non-assets so we do not pull every unrelated file in the tree.
-            var ext = Path.GetExtension(path).ToLowerInvariant();
-            switch (ext)
+            if (len < 8) return false;
+
+            switch (Asciiz(buffer, len, 20))
             {
-                case ".png":
-                case ".jpg":
-                case ".jpeg":
-                case ".mp3":
-                case ".ogg":
-                case ".wav":
-                case ".dll":
-                case ".so":
-                case ".json":
-                case ".txt":
-                case ".xml":
-                    return false;
-                default:
+                case "UnityWeb":
+                case "UnityRaw":
+                case "UnityArchive":
+                case "UnityFS":
+                case "UnityWebData1.0":
+                case "TuanjieWebData1.0":
                     return true;
             }
+
+            if (Matches(buffer, len, 0, GZipMagic)) return true;
+            if (Matches(buffer, len, 32, BrotliMagic)) return true;
+            if (IsSerializedFile(buffer, len, size)) return true;
+            if (Matches(buffer, len, 0, ZipMagic) || Matches(buffer, len, 0, ZipSpannedMagic)) return true;
+
+            // A bundle sitting at a non-zero offset inside something else. The loader only uses
+            // that offset to decide where to seek, so for filtering, the magic being there is the
+            // whole answer.
+            return IndexOf(buffer, len, UnityFsMagic, 1) > 0;
         }
+
+        private static bool IsSerializedFile(byte[] b, int len, long size)
+        {
+            if (size < 20 || len < 20) return false;
+
+            long fileSize = BeUInt32(b, 4);
+            var version = BeUInt32(b, 8);
+            long dataOffset = BeUInt32(b, 12);
+
+            if (version >= 22)
+            {
+                if (size < 48 || len < 40) return false;
+                fileSize = BeInt64(b, 24);
+                dataOffset = BeInt64(b, 32);
+            }
+
+            // The header states its own total size. If that disagrees with the file on disk this is
+            // not a serialized file that happens to be truncated, it is something else entirely.
+            return fileSize == size && dataOffset <= size;
+        }
+
+        private static string Asciiz(byte[] b, int len, int max)
+        {
+            var n = 0;
+            while (n < max && n < len && b[n] != 0) n++;
+            return Encoding.ASCII.GetString(b, 0, n);
+        }
+
+        private static bool Matches(byte[] b, int len, int offset, byte[] magic)
+        {
+            if (offset < 0 || offset + magic.Length > len) return false;
+            for (var i = 0; i < magic.Length; i++)
+            {
+                if (b[offset + i] != magic[i]) return false;
+            }
+            return true;
+        }
+
+        private static int IndexOf(byte[] b, int len, byte[] magic, int start)
+        {
+            for (var i = start; i + magic.Length <= len; i++)
+            {
+                if (Matches(b, len, i, magic)) return i;
+            }
+            return -1;
+        }
+
+        private static uint BeUInt32(byte[] b, int o) =>
+            ((uint)b[o] << 24) | ((uint)b[o + 1] << 16) | ((uint)b[o + 2] << 8) | b[o + 3];
+
+        private static long BeInt64(byte[] b, int o) =>
+            (long)(((ulong)BeUInt32(b, o) << 32) | BeUInt32(b, o + 4));
+
+        /// <summary>
+        /// AssetStudio.Progress.Default hands out percentages through <see cref="IProgress{T}"/>.
+        /// Progress&lt;T&gt; would bounce them off the thread pool, since the scan thread has no
+        /// SynchronizationContext, and they would arrive out of order; this keeps them in order.
+        /// </summary>
+        private sealed class InlineProgress<T> : IProgress<T>
+        {
+            private readonly Action<T> _handler;
+
+            public InlineProgress(Action<T> handler) => _handler = handler;
+
+            public void Report(T value) => _handler(value);
+        }
+
 
         public ExportReport Export(string outputRoot, ExportOptions options)
         {
