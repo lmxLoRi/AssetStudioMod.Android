@@ -341,3 +341,5 @@ ASALocalRun/
 
 # BeatPulse healthcheck temp database
 healthchecksdb
+# Rust build output (dev benchmarks and native libraries)
+target/
