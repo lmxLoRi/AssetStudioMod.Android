@@ -137,10 +137,16 @@ namespace AssetStudioMobile.Ui
             ShowList();
             ApplyFilter(_filter.SelectedItemPosition);
 
-            // Without this the list keeps its scroll offset, so changing batch lands you in the
-            // middle of the new one and reads as "it loaded more below" rather than "this is the
-            // next batch".
-            _list.SetSelection(0);
+            // SetSelection only moves the *selection*, which does nothing to a ListView in touch
+            // mode: the scroll offset is left where it was, so arriving at a new batch from the
+            // bottom of the old one lands at the bottom of the new one and reads as "it appended
+            // more" rather than "this is the next batch". That was the first attempt at this fix
+            // and it did nothing. SetSelectionFromTop is the call that scrolls, and it has to run
+            // after the adapter change has been laid out, hence the Post.
+            _list.Post(() =>
+            {
+                if (_list.Adapter != null && _list.Adapter.Count > 0) _list.SetSelectionFromTop(0, 0);
+            });
 
             _previous.Enabled = index > 0;
             _next.Enabled = index < _batchCount - 1;
