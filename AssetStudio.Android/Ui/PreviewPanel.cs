@@ -55,7 +55,16 @@ namespace AssetStudioMobile.Ui
         private readonly ListView _list;
         private readonly ArrayAdapter<string> _adapter;
 
+        /// <summary>
+        /// The type filter. Added after driving the browser on a real game: a batch of 10706 objects
+        /// contained 4204 MonoBehaviours, mostly unnamed, and every Sprite in it was unreachable
+        /// behind them. Counting them is useful; having to scroll past them is not.
+        /// </summary>
+        private static readonly string[] Filters = { "全部", "贴图", "Sprite", "文本", "音频", "脚本" };
+
+        private readonly List<Object> _all = new List<Object>();
         private readonly List<Object> _items = new List<Object>();
+        private readonly Spinner _filter;
         private int _batch;
         private int _token;
         private MediaPlayer _player;
@@ -74,6 +83,10 @@ namespace AssetStudioMobile.Ui
             _next = UiKit.Button(context, "下一批 ▶", () => BatchRequested?.Invoke(_batch + 1));
             var close = UiKit.Button(context, "返回导出", () => Closed?.Invoke());
 
+            _filter = new Spinner(context);
+            _filter.Adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleSpinnerDropDownItem, Filters);
+            _filter.ItemSelected += (_, e) => ApplyFilter((int)e.Position);
+
             _adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleListItem1);
             _list = new ListView(context) { Adapter = _adapter };
             _list.ItemClick += (_, e) =>
@@ -87,7 +100,7 @@ namespace AssetStudioMobile.Ui
 
             Root = UiKit.Column(context,
                 UiKit.Field(context, "浏览 · 一批一次加载，避免整棵资源树占用内存", _title),
-                UiKit.Row(context, close, _previous, _next),
+                UiKit.Row(context, close, _previous, _next, _filter),
                 UiKit.Fill(_page));
             ((LinearLayout)Root).SetPadding(UiKit.Dp(context, 12), UiKit.Dp(context, 12),
                                            UiKit.Dp(context, 12), UiKit.Dp(context, 12));
@@ -95,23 +108,41 @@ namespace AssetStudioMobile.Ui
 
         /// <summary>Only these can be shown; everything else would be a dead row that does nothing.</summary>
         public static bool IsPreviewable(Object o)
-            => o is Texture2D || o is Sprite || o is TextAsset || o is AudioClip;
+            => o is Texture2D || o is Sprite || o is TextAsset || o is AudioClip || o is MonoBehaviour;
 
         public void SetBatch(int index, IReadOnlyList<Object> objects)
         {
             _batch = index;
+            _all.Clear();
+            _all.AddRange(objects);
+
+            ShowList();
+            ApplyFilter(_filter.SelectedItemPosition);
+            _previous.Enabled = index > 0;
+            _next.Enabled = index < _batchCount - 1;
+        }
+
+        private void ApplyFilter(int filter)
+        {
             _items.Clear();
-            _items.AddRange(objects.Where(IsPreviewable));
+            _items.AddRange(_all.Where(o => Matches(o, filter)));
 
             _adapter.Clear();
             _adapter.AddAll(_items.Select(Describe).ToList());
             _adapter.NotifyDataSetChanged();
 
-            ShowList();
-            _title.Text = $"第 {index + 1}/{_batchCount} 批 · 可预览 {_items.Count} / 共 {objects.Count} 个对象";
-            _previous.Enabled = index > 0;
-            _next.Enabled = index < _batchCount - 1;
+            _title.Text = $"第 {_batch + 1}/{_batchCount} 批 · {Filters[filter]} {_items.Count} / 共 {_all.Count} 个对象";
         }
+
+        private static bool Matches(Object o, int filter) => filter switch
+        {
+            1 => o is Texture2D,
+            2 => o is Sprite,
+            3 => o is TextAsset,
+            4 => o is AudioClip,
+            5 => o is MonoBehaviour,
+            _ => IsPreviewable(o),
+        };
 
         public void SetBusy(string message)
         {
@@ -175,7 +206,9 @@ namespace AssetStudioMobile.Ui
                         ShowAudio(audio);
                         return;
                     default:
-                        ShowPage(Page(Describe(o), TextBody("这个类型还没有预览。")));
+                        // Anything else gets the same JSON the export's JsonDump writes. There is no
+                        // reason for a row to do nothing when the dump works for every type.
+                        ShowPage(Page(Describe(o), TextBody(JsonOf(o))));
                         return;
                 }
             }
@@ -302,6 +335,30 @@ namespace AssetStudioMobile.Ui
             var scroll = new ScrollView(_context);
             scroll.AddView(view);
             return scroll;
+        }
+
+        /// <summary>
+        /// The same two paths the export's JSON dump uses: the embedded type tree when the file has
+        /// one, and reflection over the parsed fields when it does not. MonoBehaviour is the type
+        /// that usually needs this, since its fields only exist as a type tree.
+        /// </summary>
+        private static string JsonOf(Object o)
+        {
+            string json;
+            try
+            {
+                json = o.Dump() ?? o.DumpObject();
+            }
+            catch (Exception ex)
+            {
+                return "dump 失败：" + ex.Message;
+            }
+
+            if (string.IsNullOrEmpty(json)) return "(这个对象没有可 dump 的内容)";
+
+            return json.Length > MaxTextBytes
+                ? json.Substring(0, MaxTextBytes) + $"\n\n…（已截断，共 {json.Length / 1024} KB）"
+                : json;
         }
 
         private static string TextOf(TextAsset asset)
