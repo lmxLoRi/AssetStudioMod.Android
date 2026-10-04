@@ -179,7 +179,45 @@ namespace AssetStudioMobile.Ui
         {
             var name = (o as NamedObject)?.m_Name;
             if (string.IsNullOrEmpty(name)) name = $"pathID {o.m_PathID}";
-            return $"{o.type}  ·  {name}";
+
+            var source = SourceOf(o);
+            return source == null ? $"{o.type}  ·  {name}" : $"{o.type}  ·  {name}   [{source}]";
+        }
+
+        /// <summary>
+        /// The file an object came from, as a bare file name.
+        ///
+        /// A batch is sixty-odd bundles and the same name shows up in several of them -- a Sprite and
+        /// its Texture2D, or a shared name in two chapters -- and without this the list gives no way
+        /// to tell which is which.
+        /// </summary>
+        private static string SourceOf(Object o)
+        {
+            var file = o.assetsFile;
+            if (file == null) return null;
+
+            var path = !string.IsNullOrEmpty(file.originalPath) ? file.originalPath
+                     : !string.IsNullOrEmpty(file.fullName) ? file.fullName
+                     : file.fileName;
+            if (string.IsNullOrEmpty(path)) return null;
+
+            var name = Path.GetFileName(path);
+            if (string.IsNullOrEmpty(name)) return path;
+
+            // An Addressables cache names every bundle __data and tells them apart by the hash
+            // directory above it -- .../UnityCache/Shared/<hash>/<hash>/__data. The bare file name
+            // then identifies nothing at all, which is what "[__data]" on every row looked like.
+            if (name == "__data" || name == "__info")
+            {
+                var parent = Path.GetFileName(Path.GetDirectoryName(path) ?? string.Empty);
+                if (!string.IsNullOrEmpty(parent))
+                {
+                    var shortHash = parent.Length > 8 ? parent.Substring(0, 8) : parent;
+                    return $"{shortHash}/{name}";
+                }
+            }
+
+            return name;
         }
 
         private void ShowList()
