@@ -608,6 +608,25 @@ namespace AssetStudioMobile
         }
 
 
+        /// <summary>
+        /// Writes a single object -- the one the browser is showing.
+        ///
+        /// Export writes the whole tree, which is thousands of files when someone only wanted the
+        /// one they had just found. This goes through the same plan and the same writers, so the
+        /// file it produces is the same file the full export would have produced.
+        /// </summary>
+        public ExportReport ExportOne(AssetStudio.Object target, string outputRoot, ExportOptions options)
+        {
+            if (target == null) throw new ArgumentNullException(nameof(target));
+            Directory.CreateDirectory(outputRoot);
+
+            var report = new ExportReport();
+            var claimed = new ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
+            Merge(report, WriteTargets(new List<AssetStudio.Object> { target }, outputRoot, options, false, claimed));
+            Finish(report);
+            return report;
+        }
+
         public ExportReport Export(string outputRoot, ExportOptions options)
         {
             var report = new ExportReport();

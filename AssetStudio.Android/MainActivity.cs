@@ -623,6 +623,7 @@ namespace AssetStudioMobile
                 SetContentView(_mainRoot);
             };
             _browser.BatchRequested += LoadBatchForBrowser;
+            _browser.ExportRequested += target => RunOnBackground(() => ExportSingle(target));
 
             SetContentView(Inset(_browser.Root));
             LoadBatchForBrowser(0);
@@ -647,6 +648,43 @@ namespace AssetStudioMobile
                 outer.SetOnApplyWindowInsetsListener(new InsetListener(root, basePad));
             }
             return outer;
+        }
+
+        /// <summary>
+        /// Writes the one object the browser is showing, through the same plan and the same writers
+        /// the full export uses, so the file is the one a full export would have produced.
+        /// </summary>
+        private void ExportSingle(AssetStudio.Object target)
+        {
+            if (_extractor == null || target == null) return;
+
+            var options = new ExportOptions
+            {
+                Kind = (ExportKind)_panel.Kind.SelectedItemPosition,
+
+                // The directory is new each time, so there is nothing to protect by skipping.
+                Overwrite = true,
+            };
+
+            var baseDir = string.IsNullOrWhiteSpace(_panel.OutputPath?.Text)
+                ? _outputDir
+                : _panel.OutputPath.Text.Trim();
+            var dest = Path.Combine(baseDir, $"{options.Kind}_{DateTime.Now:yyyyMMdd_HHmmss}");
+
+            var name = (target as NamedObject)?.m_Name;
+            if (string.IsNullOrEmpty(name)) name = $"pathID {target.m_PathID}";
+
+            try
+            {
+                var report = _extractor.ExportOne(target, dest, options);
+                Append($"{target.type} \"{name}\" -> {dest} ({report.Exported} file(s), {report.Failed} failed)");
+                RunOnUiThread(() => _browser?.SetStatus($"已导出 {report.Exported} 个文件到 {dest}"));
+            }
+            catch (Exception ex)
+            {
+                Append($"导出 \"{name}\" 失败：{ex.Message}");
+                RunOnUiThread(() => _browser?.SetStatus("导出失败：" + ex.Message));
+            }
         }
 
         private void LoadBatchForBrowser(int index)

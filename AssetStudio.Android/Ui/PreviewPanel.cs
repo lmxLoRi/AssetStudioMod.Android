@@ -43,6 +43,9 @@ namespace AssetStudioMobile.Ui
         /// <summary>Raised when the user leaves the browser.</summary>
         public event Action Closed;
 
+        /// <summary>Raised for the object the preview page is showing, to write just that one.</summary>
+        public event Action<Object> ExportRequested;
+
         private readonly Context _context;
         private readonly int _batchCount;
         private readonly Action<Action> _background;
@@ -163,6 +166,9 @@ namespace AssetStudioMobile.Ui
             _ => IsPreviewable(o),
         };
 
+        /// <summary>A one-line message where the batch summary normally sits.</summary>
+        public void SetStatus(string message) => _ui(() => _title.Text = message);
+
         public void SetBusy(string message)
         {
             _title.Text = message;
@@ -192,11 +198,16 @@ namespace AssetStudioMobile.Ui
             _page.AddView(page);
         }
 
-        private View Page(string title, View content)
+        private View Page(Object shown, View content)
         {
             var back = UiKit.Button(_context, "◀ 列表", ShowList);
+
+            // The point of browsing is to find one thing; having found it, exporting the whole tree
+            // again is not what someone means.
+            var export = UiKit.Button(_context, "导出这个", () => ExportRequested?.Invoke(shown));
+
             return UiKit.Column(_context,
-                UiKit.Row(_context, back, UiKit.Label(_context, title, 13, bold: true)),
+                UiKit.Row(_context, back, export, UiKit.Label(_context, Describe(shown), 13, bold: true)),
                 UiKit.Fill(content));
         }
 
@@ -213,13 +224,13 @@ namespace AssetStudioMobile.Ui
                 switch (o)
                 {
                     case TextAsset text:
-                        ShowPage(Page(Describe(o), TextBody(TextOf(text))));
+                        ShowPage(Page(o, TextBody(TextOf(text))));
                         return;
                     case Texture2D texture:
-                        ShowPage(Page(Describe(o), ImageBody(TextureBitmap(texture))));
+                        ShowPage(Page(o, ImageBody(TextureBitmap(texture))));
                         return;
                     case Sprite sprite:
-                        ShowPage(Page(Describe(o), ImageBody(SpriteBitmap(sprite))));
+                        ShowPage(Page(o, ImageBody(SpriteBitmap(sprite))));
                         return;
                     case AudioClip audio:
                         ShowAudio(audio);
@@ -227,7 +238,7 @@ namespace AssetStudioMobile.Ui
                     default:
                         // Anything else gets the same JSON the export's JsonDump writes. There is no
                         // reason for a row to do nothing when the dump works for every type.
-                        ShowPage(Page(Describe(o), TextBody(JsonOf(o))));
+                        ShowPage(Page(o, TextBody(JsonOf(o))));
                         return;
                 }
             }
@@ -235,7 +246,7 @@ namespace AssetStudioMobile.Ui
             {
                 // An unsupported texture format or a stripped object should not take the browser
                 // down with it; the message is more use than a crash.
-                ShowPage(Page(Describe(o), TextBody("预览失败：" + ex.Message)));
+                ShowPage(Page(o, TextBody("预览失败：" + ex.Message)));
             }
         }
 
@@ -246,8 +257,7 @@ namespace AssetStudioMobile.Ui
         private void ShowAudio(AudioClip clip)
         {
             var token = _token;
-            var title = Describe(clip);
-            ShowPage(Page(title, TextBody("正在转换音频…")));
+            ShowPage(Page(clip, TextBody("正在转换音频…")));
 
             _background(() =>
             {
@@ -265,7 +275,7 @@ namespace AssetStudioMobile.Ui
                 _ui(() =>
                 {
                     if (token != _token) return;
-                    ShowPage(Page(title, AudioBody(clip, path, error)));
+                    ShowPage(Page(clip, AudioBody(clip, path, error)));
                 });
             });
         }
