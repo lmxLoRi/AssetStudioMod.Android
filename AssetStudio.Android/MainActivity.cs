@@ -33,6 +33,9 @@ namespace AssetStudioMobile
         /// <summary>One batch load at a time: BrowseBatch reuses the extractor's manager.</summary>
         private bool _browsing;
 
+        /// <summary>And one index at a time, for the same reason.</summary>
+        private bool _indexing;
+
         private Extractor _extractor;
 
         /// <summary>Kept so a rescan keeps using the script the user picked.</summary>
@@ -722,6 +725,8 @@ namespace AssetStudioMobile
             };
             _browser.BatchRequested += LoadBatchForBrowser;
             _browser.ExportRequested += target => RunOnBackground(() => ExportSingle(target));
+            _browser.IndexRequested += kinds => RunOnBackground(() => BuildIndex(kinds));
+            _browser.IndexedRequested += entry => RunOnBackground(() => ShowIndexed(entry));
 
             SetContentView(Inset(_browser.Root));
             LoadBatchForBrowser(0);
@@ -783,6 +788,58 @@ namespace AssetStudioMobile
                 Append($"导出 \"{name}\" 失败：{ex.Message}");
                 RunOnUiThread(() => _browser?.SetStatus("导出失败：" + ex.Message));
             }
+        }
+
+        /// <summary>
+        /// Reads the whole tree once and keeps only what is needed to list what matched.
+        ///
+        /// This is what makes a filter mean the tree instead of the batch in front of you. It is a
+        /// full read of every bundle, so it is an explicit action with progress, and it stops if the
+        /// browser is closed -- there is no point finishing an index nobody will look at.
+        /// </summary>
+        private void BuildIndex(IReadOnlyCollection<ExportKind> kinds)
+        {
+            if (_extractor == null || _browser == null) return;
+            if (_indexing) return;
+
+            _indexing = true;
+            try
+            {
+                Append($"index: 正在索引 {string.Join("+", kinds)} …");
+                var entries = _extractor.BuildIndex(
+                    kinds,
+                    (done, total) => _browser?.SetStatus($"索引中 {done}/{total} 批…"),
+                    () => _browser == null);
+
+                Append($"index: {entries.Count} object(s)");
+                RunOnUiThread(() => _browser?.SetIndex(entries));
+            }
+            catch (Exception ex)
+            {
+                Append($"index: 失败 {ex.Message}");
+                RunOnUiThread(() => _browser?.SetStatus("索引失败：" + ex.Message));
+            }
+            finally
+            {
+                _indexing = false;
+            }
+        }
+
+        private void ShowIndexed(Extractor.IndexEntry entry)
+        {
+            if (_extractor == null || _browser == null) return;
+
+            AssetStudio.Object loaded = null;
+            try
+            {
+                loaded = _extractor.LoadIndexed(entry);
+            }
+            catch (Exception ex)
+            {
+                Append($"index: 加载失败 {ex.Message}");
+            }
+
+            RunOnUiThread(() => _browser?.ShowIndexed(entry, loaded));
         }
 
         private void LoadBatchForBrowser(int index)

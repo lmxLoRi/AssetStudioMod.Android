@@ -227,15 +227,14 @@ namespace AssetStudioMobile
         };
 
         /// <summary>
-        /// The categories the browser offers.
+        /// The asset categories, which both the export and the browser select from.
         ///
-        /// They come from the same enum the export kind list does, because keeping two lists had
-        /// already gone wrong: the export could not export audio at all, the browser could not
-        /// filter on it, and neither list showed the other's categories.
+        /// Not the whole enum: Auto, JsonDump, RawData and TextureRaw are output formats rather than
+        /// categories, and one list serves both screens so a category cannot exist in one and not
+        /// the other -- which is exactly what had happened with audio.
         /// </summary>
-        public static readonly ExportKind[] BrowserKinds =
+        public static readonly ExportKind[] Categories =
         {
-            ExportKind.Auto,
             ExportKind.Texture,
             ExportKind.Sprite,
             ExportKind.Mesh,
@@ -245,6 +244,43 @@ namespace AssetStudioMobile
             ExportKind.Font,
             ExportKind.Video,
         };
+
+        /// <summary>Human labels, in the same order as <see cref="Categories"/>.</summary>
+        public static readonly string[] CategoryLabels =
+            { "贴图", "Sprite", "网格", "文本", "音频", "脚本", "字体", "视频" };
+
+        /// <summary>True when an object is in any of the selected categories.</summary>
+        internal static bool MatchesAny(AssetStudio.Object o, IReadOnlyCollection<ExportKind> kinds)
+            => CategoryOf(o, kinds) != ExportKind.Auto || kinds == null || kinds.Count == 0;
+
+        /// <summary>
+        /// The first selected category an object belongs to.
+        ///
+        /// The index records this rather than just the object's type: FilterFor(Sprite) also pulls
+        /// Texture2D in, because a Sprite needs its texture loaded, and matching on type alone would
+        /// then show every texture under a Sprite filter.
+        /// </summary>
+        internal static ExportKind CategoryOf(AssetStudio.Object o, IReadOnlyCollection<ExportKind> kinds)
+        {
+            if (kinds == null || kinds.Count == 0) return ExportKind.Auto;
+            foreach (var kind in kinds)
+            {
+                if (Matches(o, kind)) return kind;
+            }
+            return ExportKind.Auto;
+        }
+
+        /// <summary>The loader filter for a set of categories, or null when there is nothing to narrow to.</summary>
+        private static ClassIDType[] FiltersFor(IEnumerable<ExportKind> kinds)
+        {
+            var set = new HashSet<ClassIDType>();
+            foreach (var kind in kinds)
+            {
+                var filter = FilterFor(kind);
+                if (filter != null) set.UnionWith(filter);
+            }
+            return set.Count == 0 ? null : set.ToArray();
+        }
 
         /// <summary>One scanned file, with the size the sniff already read.</summary>
         private readonly struct Candidate
@@ -270,6 +306,9 @@ namespace AssetStudioMobile
             LoadedKind = kind;
             _assetsManager.LoadViaTypeTree = UseTypeTree;
 
+            // Cleared first: SetAssetFilter only unions into its set, so setting a second kind
+            // without clearing would load the union of both.
+            _assetsManager.ClearAssetFilter();
             var filter = FilterFor(kind);
             if (filter != null)
             {
@@ -365,6 +404,119 @@ namespace AssetStudioMobile
 
         /// <summary>How many batches the last scan split the candidate files into.</summary>
         public int BatchCount { get; private set; }
+
+        /// <summary>
+        /// One object found by the index pass: enough to list it now and to find it again later.
+        ///
+        /// It deliberately holds no reference to the object. The whole point of the index is that
+        /// the objects are not kept -- a phone cannot hold the tree -- so what is kept is the file
+        /// it came from and how to find it inside that file.
+        /// </summary>
+        public sealed class IndexEntry
+        {
+            public int Candidate;
+            public long PathID;
+            public ClassIDType Type;
+            public string Name;
+            public string Source;
+
+            /// <summary>Which selected category it matched, so the filter can be applied exactly.</summary>
+            public ExportKind Category;
+        }
+
+        /// <summary>
+        /// Walks every candidate once and records what matches, without keeping any of it.
+        ///
+        /// This is what makes filtering mean the whole tree instead of the batch in front of you.
+        /// It is a full read of everything, so it is an explicit action with progress rather than
+        /// something that happens when the browser opens, and it can be stopped part way.
+        /// </summary>
+        public List<IndexEntry> BuildIndex(IReadOnlyCollection<ExportKind> kinds,
+                                           Action<int, int> progress, Func<bool> cancelled)
+        {
+            if (_candidates == null) throw new InvalidOperationException("Scan a folder first.");
+            if (_batches == null) _batches = new List<(int Start, int Count)>(Batches(_candidates));
+
+            // The manager was loaded with a filter that cannot be widened, so it is replaced rather
+            // than added to -- otherwise an index for a second category would still only see the
+            // first.
+            _assetsManager.Clear();
+            _assetsManager.ClearAssetFilter();
+            var narrowed = FiltersFor(kinds);
+            if (narrowed != null) _assetsManager.SetAssetFilter(narrowed);
+
+            var entries = new List<IndexEntry>();
+            for (var b = 0; b < _batches.Count; b++)
+            {
+                if (cancelled != null && cancelled()) break;
+
+                _assetsManager.Clear();
+                var (start, count) = _batches[b];
+                LoadBatch(start, count);
+
+                // One pass over the files this batch produced. The first version of this nested the
+                // file loop inside a loop over the batch's candidates, so with 64 files in a batch
+                // every object was counted 64 times -- an index of the test cache reported 727,728
+                // textures where the export matches 17,766.
+                foreach (var file in _assetsManager.AssetsFileList)
+                {
+                    // A SerializedFile records the reader it came from, so the candidate is the one
+                    // whose path is a prefix of it. A zip's entries carry the archive path plus the
+                    // entry name, which is why this compares prefixes rather than equality.
+                    var fullPath = file.fullName ?? file.originalPath ?? file.fileName ?? string.Empty;
+                    var candidate = start;
+                    for (var i = 0; i < count; i++)
+                    {
+                        if (!fullPath.StartsWith(_candidates[start + i].Path, StringComparison.Ordinal)) continue;
+                        candidate = start + i;
+                        break;
+                    }
+
+                    foreach (var o in file.Objects)
+                    {
+                        var category = CategoryOf(o, kinds);
+                        if (category == ExportKind.Auto) continue;
+
+                        entries.Add(new IndexEntry
+                        {
+                            Candidate = candidate,
+                            PathID = o.m_PathID,
+                            Type = o.type,
+                            Category = category,
+                            Name = SafeName((o as NamedObject)?.m_Name),
+                            Source = fullPath,
+                        });
+                    }
+                }
+
+                progress?.Invoke(b + 1, _batches.Count);
+            }
+
+            return entries;
+        }
+
+        /// <summary>
+        /// Loads the one file an index entry came from and hands back that object.
+        ///
+        /// The caller keeps it only as long as it is on screen; the next call replaces it.
+        /// </summary>
+        public AssetStudio.Object LoadIndexed(IndexEntry entry)
+        {
+            if (entry == null || _candidates == null) return null;
+
+            _assetsManager.Clear();
+            LoadBatch(entry.Candidate, 1);
+
+            foreach (var file in _assetsManager.AssetsFileList)
+            {
+                foreach (var o in file.Objects)
+                {
+                    if (o.m_PathID == entry.PathID && o.type == entry.Type) return o;
+                }
+            }
+
+            return null;
+        }
 
         /// <summary>
         /// Loads one batch and keeps its objects, for browsing.

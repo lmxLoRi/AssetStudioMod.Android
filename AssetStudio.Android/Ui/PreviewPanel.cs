@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using Android.App;
 using Android.Content;
 using Android.Graphics;
 using Android.Media;
@@ -46,6 +47,16 @@ namespace AssetStudioMobile.Ui
         /// <summary>Raised for the object the preview page is showing, to write just that one.</summary>
         public event Action<Object> ExportRequested;
 
+        /// <summary>Raised when a row from the index is opened and its file has to be loaded.</summary>
+        public event Action<Extractor.IndexEntry> IndexedRequested;
+
+        /// <summary>
+        /// Raised when a selection needs an index of the whole tree. It carries the categories, and
+        /// fires on selection rather than from a button: narrowing to a category and then being
+        /// shown only the batch in front of you is the thing the index exists to stop.
+        /// </summary>
+        public event Action<IReadOnlyCollection<ExportKind>> IndexRequested;
+
         private readonly Context _context;
         private readonly int _batchCount;
         private readonly Action<Action> _background;
@@ -59,21 +70,29 @@ namespace AssetStudioMobile.Ui
         private readonly ArrayAdapter<string> _adapter;
 
         /// <summary>
-        /// Labels for <see cref="Extractor.BrowserKinds"/>, one per entry and in the same order.
-        ///
-        /// Kept beside it rather than as its own list because two lists is what went wrong: the
-        /// export could not export audio and the browser could not filter on it, and neither showed
-        /// the other's categories. Anything added to BrowserKinds needs a label here.
+        /// The selected categories. Empty means everything, which is also what decides the mode: any
+        /// selection narrows the tree enough to be worth indexing, and everything does not.
         /// </summary>
-        private static readonly string[] FilterLabels =
-            { "全部", "贴图", "Sprite", "网格", "文本", "音频", "脚本", "字体", "视频" };
+        private readonly HashSet<ExportKind> _selected = new HashSet<ExportKind>();
 
-        private readonly List<Object> _all = new List<Object>();
-        private readonly List<Object> _items = new List<Object>();
-        private readonly Spinner _filter;
+        /// <summary>
+        /// A list row. Either the object is already in memory, from a loaded batch, or the index
+        /// knows which file to open to find it and it is loaded when it is asked for.
+        /// </summary>
+        private sealed class Row
+        {
+            public Object Loaded;
+            public Extractor.IndexEntry Entry;
+            public string Text;
+        }
+
+        private readonly List<Row> _all = new List<Row>();
+        private readonly List<Row> _items = new List<Row>();
+        private readonly Button _filterButton;
         private readonly EditText _search;
         private int _batch;
         private int _token;
+        private bool _indexed;
         private MediaPlayer _player;
 
         // The audio page's own controls, held so the ticker can update them and so StopAudio can
@@ -98,22 +117,32 @@ namespace AssetStudioMobile.Ui
             _next = UiKit.Button(context, "下一批 ▶", () => BatchRequested?.Invoke(_batch + 1));
             var close = UiKit.Button(context, "返回导出", () => Closed?.Invoke());
 
-            _filter = new Spinner(context);
-            _filter.Adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleSpinnerDropDownItem, FilterLabels);
-            _filter.ItemSelected += (_, e) => ApplyFilter((int)e.Position);
+            _filterButton = UiKit.Button(context, "筛选: 全部", ChooseCategories);
 
             // A batch can be ten thousand objects, and the type filter alone still leaves thousands
             // of them. Rebuilding the list per keystroke is a few milliseconds for that many rows.
             _search = UiKit.Input(context, "");
             _search.Hint = "按名字过滤";
-            _search.TextChanged += (_, _) => ApplyFilter(_filter.SelectedItemPosition);
+            _search.TextChanged += (_, _) => ApplySelection();
 
             _adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleListItem1);
             _list = new ListView(context) { Adapter = _adapter };
             _list.ItemClick += (_, e) =>
             {
                 var position = (int)e.Position;
-                if (position >= 0 && position < _items.Count) Show(_items[position]);
+                if (position < 0 || position >= _items.Count) return;
+
+                var row = _items[position];
+                if (row.Loaded != null)
+                {
+                    Show(row.Loaded);
+                    return;
+                }
+
+                // The index knows where it is, not what it is; the owner opens that one file and
+                // calls back.
+                SetStatus($"正在加载 {row.Text}…");
+                IndexedRequested?.Invoke(row.Entry);
             };
 
             _page = new LinearLayout(context) { Orientation = Android.Widget.Orientation.Vertical };
@@ -121,7 +150,7 @@ namespace AssetStudioMobile.Ui
 
             Root = UiKit.Column(context,
                 UiKit.Field(context, "浏览 · 一批一次加载，避免整棵资源树占用内存", _title),
-                UiKit.Row(context, close, _previous, _next, _filter),
+                UiKit.Row(context, close, _previous, _next, _filterButton),
                 _search,
                 UiKit.Fill(_page));
             ((LinearLayout)Root).SetPadding(UiKit.Dp(context, 12), UiKit.Dp(context, 12),
@@ -131,11 +160,12 @@ namespace AssetStudioMobile.Ui
         public void SetBatch(int index, IReadOnlyList<Object> objects)
         {
             _batch = index;
+            _indexed = false;
             _all.Clear();
-            _all.AddRange(objects);
+            foreach (var o in objects) _all.Add(new Row { Loaded = o, Text = Describe(o) });
 
             ShowList();
-            ApplyFilter(_filter.SelectedItemPosition);
+            ApplySelection();
 
             // SetSelection only moves the *selection*, which does nothing to a ListView in touch
             // mode: the scroll offset is left where it was, so arriving at a new batch from the
@@ -152,29 +182,150 @@ namespace AssetStudioMobile.Ui
             _next.Enabled = index < _batchCount - 1;
         }
 
-        private void ApplyFilter(int filter)
+        /// <summary>
+        /// Replaces the batch view with everything the index found across the whole tree. Batch
+        /// navigation is meaningless in this mode: the point is that the list is no longer cut up by
+        /// which file things happened to live in.
+        /// </summary>
+        public void SetIndex(IReadOnlyList<Extractor.IndexEntry> entries)
+        {
+            _indexed = true;
+            _all.Clear();
+            foreach (var entry in entries) _all.Add(new Row { Entry = entry, Text = DescribeIndexed(entry) });
+
+            _previous.Enabled = false;
+            _next.Enabled = false;
+            ApplySelection();
+            _list.Post(() =>
+            {
+                if (_list.Adapter != null && _list.Adapter.Count > 0) _list.SetSelectionFromTop(0, 0);
+            });
+        }
+
+        /// <summary>Hands the object for an index row back to the list, which then previews it.</summary>
+        public void ShowIndexed(Extractor.IndexEntry entry, Object loaded)
+        {
+            foreach (var row in _all)
+            {
+                if (ReferenceEquals(row.Entry, entry)) { row.Loaded = loaded; break; }
+            }
+
+            if (loaded == null)
+            {
+                ShowPage(Page("索引条目", TextBody("加载失败：文件里找不到这个对象了。")));
+                return;
+            }
+
+            Show(loaded);
+        }
+
+        private static string DescribeIndexed(Extractor.IndexEntry entry)
+        {
+            var name = string.IsNullOrEmpty(entry.Name) ? $"pathID {entry.PathID}" : entry.Name;
+            var source = ShortSource(entry.Source);
+            return source == null ? $"{entry.Type}  ·  {name}" : $"{entry.Type}  ·  {name}   [{source}]";
+        }
+
+        private void ApplySelection()
         {
             var query = _search.Text?.Trim();
-            var kind = Extractor.BrowserKinds[Math.Min(filter, Extractor.BrowserKinds.Length - 1)];
 
             _items.Clear();
-            _items.AddRange(_all.Where(o => Extractor.Matches(o, kind) && MatchesQuery(o, query)));
+            foreach (var row in _all)
+            {
+                if (!MatchesSelection(row)) continue;
+                if (!MatchesQuery(row, query)) continue;
+                _items.Add(row);
+            }
 
             _adapter.Clear();
-            _adapter.AddAll(_items.Select(Describe).ToList());
+            _adapter.AddAll(_items.Select(r => r.Text).ToList());
             _adapter.NotifyDataSetChanged();
 
             var byName = string.IsNullOrEmpty(query) ? "" : $"“{query}” ";
-            var label = FilterLabels[Math.Min(filter, FilterLabels.Length - 1)];
-            _title.Text = $"第 {_batch + 1}/{_batchCount} 批 · {label} {byName}{_items.Count} / 共 {_all.Count} 个对象";
+            var label = SelectionLabel();
+            _title.Text = _indexed
+                ? $"索引（整棵树）· {label} {byName}{_items.Count} / 共 {_all.Count} 个对象"
+                : $"第 {_batch + 1}/{_batchCount} 批 · {label} {byName}{_items.Count} / 共 {_all.Count} 个对象";
         }
 
-        private static bool MatchesQuery(Object o, string query)
+        private static bool MatchesQuery(Row row, string query)
         {
             if (string.IsNullOrEmpty(query)) return true;
+            return row.Text != null && row.Text.Contains(query, StringComparison.OrdinalIgnoreCase);
+        }
 
-            var name = (o as NamedObject)?.m_Name;
-            return name != null && name.Contains(query, StringComparison.OrdinalIgnoreCase);
+        /// <summary>
+        /// A loaded object is matched the way the export matches it. An index entry has no object to
+        /// ask, so it is matched on the category the index recorded for it.
+        /// </summary>
+        private bool MatchesSelection(Row row)
+        {
+            if (_selected.Count == 0) return true;
+            if (row.Loaded != null) return Extractor.MatchesAny(row.Loaded, _selected);
+            return _selected.Contains(row.Entry.Category);
+        }
+
+        private string SelectionLabel()
+        {
+            if (_selected.Count == 0) return "全部";
+
+            var parts = new List<string>();
+            for (var i = 0; i < Extractor.Categories.Length; i++)
+            {
+                if (_selected.Contains(Extractor.Categories[i])) parts.Add(Extractor.CategoryLabels[i]);
+            }
+            return string.Join("+", parts);
+        }
+
+        /// <summary>
+        /// Multi-select, because "find the animations and the audio" is a normal thing to want and a
+        /// spinner can only express one of them.
+        /// </summary>
+        private void ChooseCategories()
+        {
+            var kinds = Extractor.Categories;
+            var checkedStates = new bool[kinds.Length];
+            for (var i = 0; i < kinds.Length; i++) checkedStates[i] = _selected.Contains(kinds[i]);
+
+            var snapshot = new HashSet<ExportKind>(_selected);
+
+            new AlertDialog.Builder(_context)
+                .SetTitle("筛选类别（全不选 = 全部）")
+                .SetMultiChoiceItems(Extractor.CategoryLabels, checkedStates, (_, e) =>
+                {
+                    if (e.IsChecked) _selected.Add(kinds[e.Which]);
+                    else _selected.Remove(kinds[e.Which]);
+                })
+                .SetPositiveButton("确定", (_, _) => SelectionChanged())
+                .SetNeutralButton("全部", (_, _) =>
+                {
+                    _selected.Clear();
+                    SelectionChanged();
+                })
+                .SetNegativeButton("取消", (_, _) =>
+                {
+                    _selected.Clear();
+                    foreach (var kind in snapshot) _selected.Add(kind);
+                })
+                .Show();
+        }
+
+        private void SelectionChanged()
+        {
+            _filterButton.Text = "筛选: " + SelectionLabel();
+
+            if (_selected.Count == 0)
+            {
+                // Nothing to narrow, so the batch view is the right one again -- and an index of the
+                // whole tree would be every object in it.
+                _indexed = false;
+                BatchRequested?.Invoke(_batch);
+                return;
+            }
+
+            SetStatus("正在索引 " + SelectionLabel() + " …");
+            IndexRequested?.Invoke(_selected);
         }
 
 
@@ -212,6 +363,12 @@ namespace AssetStudioMobile.Ui
             var path = !string.IsNullOrEmpty(file.originalPath) ? file.originalPath
                      : !string.IsNullOrEmpty(file.fullName) ? file.fullName
                      : file.fileName;
+            return ShortSource(path);
+        }
+
+        /// <summary>Shared with the index, which stores the full path and shortens it the same way.</summary>
+        private static string ShortSource(string path)
+        {
             if (string.IsNullOrEmpty(path)) return null;
 
             var name = Path.GetFileName(path);
@@ -250,16 +407,19 @@ namespace AssetStudioMobile.Ui
         }
 
         private View Page(Object shown, View content)
+            => Page(Describe(shown), content, () => ExportRequested?.Invoke(shown));
+
+        private View Page(string title, View content, Action export = null)
         {
             var back = UiKit.Button(_context, "◀ 列表", ShowList);
+            var row = UiKit.Row(_context, back);
 
             // The point of browsing is to find one thing; having found it, exporting the whole tree
-            // again is not what someone means.
-            var export = UiKit.Button(_context, "导出这个", () => ExportRequested?.Invoke(shown));
+            // again is not what someone means. A page with nothing to export does not offer it.
+            if (export != null) row.AddView(UiKit.Button(_context, "导出这个", export));
+            row.AddView(UiKit.Label(_context, title, 13, bold: true));
 
-            return UiKit.Column(_context,
-                UiKit.Row(_context, back, export, UiKit.Label(_context, Describe(shown), 13, bold: true)),
-                UiKit.Fill(content));
+            return UiKit.Column(_context, row, UiKit.Fill(content));
         }
 
         private void Show(Object o)
