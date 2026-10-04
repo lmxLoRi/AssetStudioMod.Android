@@ -22,8 +22,9 @@ namespace AssetStudioMobile.Ui
         /// with whatever extension the contained format calls for, or null with
         /// <paramref name="error"/> set.
         /// </summary>
-        public static string Write(byte[] data, int length, string destinationStem, out string error)
+        public static byte[] Write(byte[] data, int length, out string extension, out string error)
         {
+            extension = null;
             error = null;
             try
             {
@@ -45,16 +46,14 @@ namespace AssetStudioMobile.Ui
                 }
 
                 var sample = bank.Samples[0];
-                if (!sample.RebuildAsStandardFileFormat(out var payload, out var extension)
+                if (!sample.RebuildAsStandardFileFormat(out var payload, out extension)
                     || payload == null || string.IsNullOrEmpty(extension))
                 {
                     error = $"托管解码器还不支持这个编码（{bank.Header.AudioType}）";
                     return null;
                 }
 
-                var path = destinationStem + "." + extension;
-                File.WriteAllBytes(path, payload);
-                return path;
+                return payload;
             }
             catch (Exception ex)
             {

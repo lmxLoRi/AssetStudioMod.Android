@@ -62,7 +62,15 @@ namespace AssetStudioMobile
 
     public sealed class ExportOptions
     {
-        public ExportKind Kind = ExportKind.Auto;
+        /// <summary>How to write each object: Auto, JsonDump, RawData or TextureRaw.</summary>
+        public ExportKind Mode = ExportKind.Auto;
+
+        /// <summary>
+        /// Which categories to write. Empty means everything. The same selection the browser
+        /// filters with, so "what I filtered" and "what I exported" are the same set by
+        /// construction rather than by two lists agreeing.
+        /// </summary>
+        public IReadOnlyCollection<ExportKind> Categories;
         public bool Overwrite;
         public bool FlipTextures = true;
         public SpriteMaskMode SpriteMask = SpriteMaskMode.Off;
@@ -180,7 +188,8 @@ namespace AssetStudioMobile
         private int _loadedObjects;
 
         /// <summary>The kind this instance was loaded for; see <see cref="FilterFor"/>.</summary>
-        public ExportKind LoadedKind { get; private set; }
+        /// <summary>Which categories the last load was narrowed to. Empty means everything.</summary>
+        public IReadOnlyCollection<ExportKind> LoadedCategories { get; private set; } = Array.Empty<ExportKind>();
 
         /// <summary>Where to write the phase report, so a measurement survives the run.</summary>
         public string ReportPath;
@@ -327,18 +336,18 @@ namespace AssetStudioMobile
         /// Recursively scans <paramref name="root"/> and loads every Unity file found, keeping only
         /// the object types <paramref name="kind"/> can export.
         /// </summary>
-        public void Load(string root, ExportKind kind)
+        public void Load(string root, IReadOnlyCollection<ExportKind> categories)
         {
             if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
 
-            LoadedKind = kind;
+            LoadedCategories = categories ?? Array.Empty<ExportKind>();
             _indexedCandidate = -1;
             _assetsManager.LoadViaTypeTree = UseTypeTree;
 
             // Cleared first: SetAssetFilter only unions into its set, so setting a second kind
             // without clearing would load the union of both.
             _assetsManager.ClearAssetFilter();
-            var filter = FilterFor(kind);
+            var filter = FiltersFor(LoadedCategories);
             if (filter != null)
             {
                 _assetsManager.SetAssetFilter(filter);
@@ -638,7 +647,7 @@ namespace AssetStudioMobile
             var worker = new Worker();
             worker.Manager.LoadViaTypeTree = UseTypeTree;
 
-            var filter = FilterFor(LoadedKind);
+            var filter = FiltersFor(LoadedCategories);
             if (filter != null) worker.Manager.SetAssetFilter(filter);
             return worker;
         }
@@ -948,6 +957,49 @@ namespace AssetStudioMobile
             return report;
         }
 
+        /// <summary>
+        /// Writes the objects an index selected.
+        ///
+        /// The index holds no objects, so this loads the files they came from -- each one once, no
+        /// matter how many of its objects were selected. Everything else is the same plan and the
+        /// same writers the tree export uses, so the files are the ones that export would produce.
+        /// </summary>
+        public ExportReport ExportIndexed(IReadOnlyList<IndexEntry> entries, string outputRoot,
+                                          ExportOptions options)
+        {
+            var report = new ExportReport();
+            Directory.CreateDirectory(outputRoot);
+
+            var claimed = new ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
+
+            foreach (var group in entries.GroupBy(e => e.Candidate))
+            {
+                // Keyed by source file as well: one candidate can be a zip holding dozens of
+                // serialized files, and a pathID is only unique inside one of them, so matching on
+                // pathID and type alone pulled in namesakes from its siblings.
+                var wanted = new HashSet<(string, long, ClassIDType)>(
+                    group.Select(e => (e.Source, e.PathID, e.Type)));
+
+                _assetsManager.Clear();
+                _indexedCandidate = -1;
+                LoadBatch(group.Key, 1);
+
+                var targets = new List<AssetStudio.Object>();
+                foreach (var file in _assetsManager.AssetsFileList)
+                {
+                    foreach (var o in file.Objects)
+                    {
+                        if (wanted.Contains((file.fullName, o.m_PathID, o.type))) targets.Add(o);
+                    }
+                }
+
+                Merge(report, WriteTargets(targets, outputRoot, options, false, claimed));
+            }
+
+            Finish(report);
+            return report;
+        }
+
         public ExportReport Export(string outputRoot, ExportOptions options)
         {
             var report = new ExportReport();
@@ -1028,7 +1080,7 @@ namespace AssetStudioMobile
                 if (f?.Objects == null) continue;
                 foreach (var o in f.Objects)
                 {
-                    if (o != null && Matches(o, options.Kind)) targets.Add(o);
+                    if (o != null && MatchesAny(o, options.Categories)) targets.Add(o);
                 }
             }
             return targets;
@@ -1100,7 +1152,7 @@ namespace AssetStudioMobile
                     }
                     else
                     {
-                        if (plan.Extension == ".rawdata" && options.Kind != ExportKind.RawData) report.RawFallback++;
+                        if (plan.Extension == ".rawdata" && options.Mode != ExportKind.RawData) report.RawFallback++;
 
                         try
                         {
@@ -1232,7 +1284,7 @@ namespace AssetStudioMobile
         {
             switch (o)
             {
-                case Texture2D raw when options.Kind == ExportKind.TextureRaw
+                case Texture2D raw when options.Mode == ExportKind.TextureRaw
                                         && raw.m_Width > 0 && raw.m_Height > 0:
                     return new ExportPlan
                     {
@@ -1320,6 +1372,24 @@ namespace AssetStudioMobile
                         Write = (obj, dest, opt) => File.WriteAllBytes(dest, ((TextAsset)obj).m_Script),
                     };
 
+                case AudioClip clip:
+                {
+                    // Converted at plan time rather than in the writer, because the extension decides
+                    // the output path and only the conversion knows whether this is a wav or an ogg.
+                    var payload = AudioCodec.Convert(clip, out var audioExtension, out var audioError);
+                    if (payload == null)
+                    {
+                        throw new InvalidOperationException(audioError ?? "audio conversion failed");
+                    }
+
+                    var bytes = payload;
+                    return new ExportPlan
+                    {
+                        Extension = audioExtension,
+                        Write = (obj, dest, opt) => File.WriteAllBytes(dest, bytes),
+                    };
+                }
+
                 case Font font when font.m_FontData != null && font.m_FontData.Length > 0:
                     // Unity stores real TTFs/OTFs inline; sniff the magic like the CLI does.
                     return new ExportPlan
@@ -1336,7 +1406,7 @@ namespace AssetStudioMobile
                     };
 
                 default:
-                    if (options.Kind == ExportKind.RawData)
+                    if (options.Mode == ExportKind.RawData)
                     {
                         return RawPlan();
                     }

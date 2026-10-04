@@ -37,7 +37,6 @@ namespace AssetStudioMobile.Ui
 
         public EditText InputPath { get; }
         public EditText OutputPath { get; }
-        public Spinner Kind { get; }
         public CheckBox Overwrite { get; }
         public TextView PermissionStatus { get; }
 
@@ -142,16 +141,6 @@ namespace AssetStudioMobile.Ui
             root.AddView(new TextView(activity) { Text = "Export to" });
             OutputPath = new EditText(activity) { TextSize = 12f };
             root.AddView(OutputPath);
-
-            // Built from the enum rather than the export_kinds string array. The two drifted apart
-            // when TextureRaw was added: the array still had 7 entries, the intent selected index 7,
-            // and the Spinner's ArrayAdapter.getItem threw ArrayIndexOutOfBoundsException while
-            // laying out -- a crash on the UI thread, not a mislabelled row.
-            Kind = new Spinner(activity);
-            Kind.Adapter = new ArrayAdapter<string>(activity, Android.Resource.Layout.SimpleSpinnerDropDownItem,
-                                                    Enum.GetNames(typeof(ExportKind)));
-            root.AddView(new TextView(activity) { Text = "Export kind" });
-            root.AddView(Kind);
 
             Overwrite = new CheckBox(activity) { Text = "Overwrite existing" };
             root.AddView(Overwrite);

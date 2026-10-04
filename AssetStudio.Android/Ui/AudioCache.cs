@@ -31,12 +31,6 @@ namespace AssetStudioMobile.Ui
         {
             error = null;
 
-            if (clip.m_AudioData == null)
-            {
-                error = "这个 AudioClip 的音频数据被 strip 掉了";
-                return null;
-            }
-
             // The stem is the same for either outcome so that looking for a cached conversion does
             // not have to know which converter produced it.
             var stem = Path.Combine(cacheDirectory, "audio", $"{clip.m_PathID}_{Safe(clip.m_Name)}");
@@ -48,49 +42,12 @@ namespace AssetStudioMobile.Ui
 
             Directory.CreateDirectory(Path.GetDirectoryName(stem));
 
-            var data = BigArrayPool<byte>.Shared.Rent(clip.m_AudioData.Size);
-            try
-            {
-                var length = clip.m_AudioData.GetData(data);
-                if (length <= 0)
-                {
-                    error = "读不到音频数据";
-                    return null;
-                }
+            var payload = AudioCodec.Convert(clip, out var realExtension, out error);
+            if (payload == null) return null;
 
-                var converter = new AudioClipConverter(clip);
-
-                // Legacy here means the reader holds the whole clip rather than a resource pointer.
-                // It is written straight to a wav header with no decoder involved, so it works even
-                // where FMOD cannot load.
-                if (converter.IsLegacy)
-                {
-                    var legacyLog = string.Empty;
-                    var raw = converter.RawAudioClipToWav(ref legacyLog);
-                    if (raw != null && raw.Length >= MinimumBytes) return Save(stem, ".wav", raw);
-                }
-                else if (AudioClipConverter.UnavailableReason == null)
-                {
-                    // FMOD covers every format the tool has ever supported, so it goes first when it
-                    // is present and the desktop behaviour is unchanged.
-                    var debug = string.Empty;
-                    var wav = converter.ConvertToWav(data, ref debug);
-                    if (wav != null && wav.Length >= MinimumBytes) return Save(stem, ".wav", wav);
-                }
-
-                // No FMOD: read the FSB5 container in managed code. This is the Android path.
-                var managed = FsbAudio.Write(data, length, stem, out var managedError);
-                if (managed != null) return managed;
-
-                error = AudioClipConverter.UnavailableReason != null
-                    ? managedError
-                    : "转换失败";
-                return null;
-            }
-            finally
-            {
-                BigArrayPool<byte>.Shared.Return(data);
-            }
+            var path = stem + realExtension;
+            File.WriteAllBytes(path, payload);
+            return path;
         }
 
         private static readonly string[] CachedExtensions = { ".wav", ".ogg" };

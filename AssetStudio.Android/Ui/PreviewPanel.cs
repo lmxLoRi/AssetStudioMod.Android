@@ -47,6 +47,15 @@ namespace AssetStudioMobile.Ui
         /// <summary>Raised for the object the preview page is showing, to write just that one.</summary>
         public event Action<Object> ExportRequested;
 
+        /// <summary>Raised for "export everything", whatever the filter says.</summary>
+        public event Action ExportAllRequested;
+
+        /// <summary>Raised for "export what the filter selected", with the index behind it.</summary>
+        public event Action<IReadOnlyList<Extractor.IndexEntry>> ExportFilteredRequested;
+
+        /// <summary>Raised when the category selection changes, so the export uses the same set.</summary>
+        public event Action<IReadOnlyCollection<ExportKind>> SelectionChanged;
+
         /// <summary>Raised when a row from the index is opened and its file has to be loaded.</summary>
         public event Action<Extractor.IndexEntry> IndexedRequested;
 
@@ -89,10 +98,14 @@ namespace AssetStudioMobile.Ui
         private readonly List<Row> _all = new List<Row>();
         private readonly List<Row> _items = new List<Row>();
         private readonly Button _filterButton;
+        private readonly Button _exportFiltered;
         private readonly EditText _search;
         private int _batch;
         private int _token;
         private bool _indexed;
+
+        /// <summary>What the last index found, so "export the selection" has something to write.</summary>
+        private IReadOnlyList<Extractor.IndexEntry> _indexEntries = Array.Empty<Extractor.IndexEntry>();
         private MediaPlayer _player;
 
         // The audio page's own controls, held so the ticker can update them and so StopAudio can
@@ -116,6 +129,12 @@ namespace AssetStudioMobile.Ui
             _previous = UiKit.Button(context, "◀ 上一批", () => BatchRequested?.Invoke(_batch - 1));
             _next = UiKit.Button(context, "下一批 ▶", () => BatchRequested?.Invoke(_batch + 1));
             var close = UiKit.Button(context, "返回导出", () => Closed?.Invoke());
+            var exportAll = UiKit.Button(context, "导出全部", () => ExportAllRequested?.Invoke());
+
+            // Disabled rather than hidden when nothing is indexed: a missing button reads as a
+            // feature that does not exist, a greyed one reads as "select something first".
+            _exportFiltered = UiKit.Button(context, "导出筛选", () => ExportFilteredRequested?.Invoke(_indexEntries));
+            _exportFiltered.Enabled = false;
 
             _filterButton = UiKit.Button(context, "筛选: 全部", ChooseCategories);
 
@@ -150,7 +169,8 @@ namespace AssetStudioMobile.Ui
 
             Root = UiKit.Column(context,
                 UiKit.Field(context, "浏览 · 一批一次加载，避免整棵资源树占用内存", _title),
-                UiKit.Row(context, close, _previous, _next, _filterButton),
+                UiKit.Row(context, close, exportAll, _exportFiltered),
+                UiKit.Row(context, _previous, _next, _filterButton),
                 _search,
                 UiKit.Fill(_page));
             ((LinearLayout)Root).SetPadding(UiKit.Dp(context, 12), UiKit.Dp(context, 12),
@@ -161,6 +181,8 @@ namespace AssetStudioMobile.Ui
         {
             _batch = index;
             _indexed = false;
+            _indexEntries = Array.Empty<Extractor.IndexEntry>();
+            _exportFiltered.Enabled = false;
             _all.Clear();
             foreach (var o in objects) _all.Add(new Row { Loaded = o, Text = Describe(o) });
 
@@ -190,11 +212,13 @@ namespace AssetStudioMobile.Ui
         public void SetIndex(IReadOnlyList<Extractor.IndexEntry> entries)
         {
             _indexed = true;
+            _indexEntries = entries;
             _all.Clear();
             foreach (var entry in entries) _all.Add(new Row { Entry = entry, Text = DescribeIndexed(entry) });
 
             _previous.Enabled = false;
             _next.Enabled = false;
+            _exportFiltered.Enabled = entries.Count > 0;
             ApplySelection();
             _list.Post(() =>
             {
@@ -297,11 +321,11 @@ namespace AssetStudioMobile.Ui
                     if (e.IsChecked) _selected.Add(kinds[e.Which]);
                     else _selected.Remove(kinds[e.Which]);
                 })
-                .SetPositiveButton("确定", (_, _) => SelectionChanged())
+                .SetPositiveButton("确定", (_, _) => ApplyCategorySelection())
                 .SetNeutralButton("全部", (_, _) =>
                 {
                     _selected.Clear();
-                    SelectionChanged();
+                    ApplyCategorySelection();
                 })
                 .SetNegativeButton("取消", (_, _) =>
                 {
@@ -311,9 +335,10 @@ namespace AssetStudioMobile.Ui
                 .Show();
         }
 
-        private void SelectionChanged()
+        private void ApplyCategorySelection()
         {
             _filterButton.Text = "筛选: " + SelectionLabel();
+            SelectionChanged?.Invoke(new List<ExportKind>(_selected));
 
             if (_selected.Count == 0)
             {

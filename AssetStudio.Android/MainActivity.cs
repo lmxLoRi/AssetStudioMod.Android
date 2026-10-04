@@ -36,6 +36,18 @@ namespace AssetStudioMobile
         /// <summary>And one index at a time, for the same reason.</summary>
         private bool _indexing;
 
+        /// <summary>
+        /// The categories in play, empty meaning everything.
+        ///
+        /// One set, not two: the browser's filter writes it and the export reads it, so what was
+        /// filtered and what gets written cannot drift apart -- which is what happened when the
+        /// export and the browser each kept their own list.
+        /// </summary>
+        private readonly HashSet<ExportKind> _categories = new HashSet<ExportKind>();
+
+        /// <summary>How to write each object. Auto unless asked otherwise.</summary>
+        private ExportKind _mode = ExportKind.Auto;
+
         private Extractor _extractor;
 
         /// <summary>Kept so a rescan keeps using the script the user picked.</summary>
@@ -104,7 +116,7 @@ namespace AssetStudioMobile
             _panel.PickApkRequested += PickApkFile;
             _panel.ImportFromAppRequested += ChooseInstalledApp;
             _panel.ScanRequested += () => RunOnBackground(Scan);
-            _panel.ExportRequested += () => RunOnBackground(() => Export(_panel.Kind.SelectedItemPosition, _panel.Overwrite.Checked));
+            _panel.ExportRequested += () => RunOnBackground(() => Export(_panel.Overwrite.Checked));
             _panel.SelfTestRequested += () => RunOnBackground(() => SelfTest.AppendResults(Append));
             _panel.BrowseRequested += OpenBrowser;
             _panel.PickScriptRequested += PickScript;
@@ -205,19 +217,29 @@ namespace AssetStudioMobile
                     // uses, so this works on a game's own Android/data directory too.
                     var exportPath = intent.GetStringExtra("path");
 
+                    // `-e kind Texture` still means what it always meant. A category name selects
+                    // that category; a mode name (Auto, JsonDump, RawData, TextureRaw) chooses how
+                    // to write everything.
                     var kindName = intent.GetStringExtra("kind");
-                    var idx = 0;
-                    if (!string.IsNullOrEmpty(kindName))
+                    if (!string.IsNullOrEmpty(kindName) && Enum.TryParse<ExportKind>(kindName, true, out var parsed))
                     {
-                        idx = Math.Max(0, Array.IndexOf(Enum.GetNames(typeof(ExportKind)), kindName));
+                        _categories.Clear();
+                        if (Array.IndexOf(Extractor.Categories, parsed) >= 0) _categories.Add(parsed);
+                        else _mode = parsed;
                     }
-                    if (intent.GetBooleanExtra("overwrite", false)) _panel.Overwrite.Checked = true;
 
-                    // Scan() reads the kind off the spinner to decide which object types to build,
-                    // so the spinner has to agree with what was asked for here. Clamped: an index
-                    // past the end of the adapter is a crash, and an unknown kind name used to
-                    // produce exactly that.
-                    _panel.Kind.SetSelection(Math.Min(idx, _panel.Kind.Adapter.Count - 1));
+                    var categoryList = intent.GetStringExtra("categories");
+                    if (!string.IsNullOrEmpty(categoryList))
+                    {
+                        _categories.Clear();
+                        foreach (var name in categoryList.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                        {
+                            if (Enum.TryParse<ExportKind>(name.Trim(), true, out var one)
+                                && Array.IndexOf(Extractor.Categories, one) >= 0) _categories.Add(one);
+                        }
+                    }
+
+                    if (intent.GetBooleanExtra("overwrite", false)) _panel.Overwrite.Checked = true;
 
                     RunOnBackground(() =>
                     {
@@ -232,7 +254,7 @@ namespace AssetStudioMobile
                         // Each `am start` is a fresh process, so an export launched this way has
                         // no loaded assets unless we scan first.
                         if (_extractor == null) Scan();
-                        Export(idx, _panel.Overwrite.Checked);
+                        Export(_panel.Overwrite.Checked);
                     });
                     break;
                 }
@@ -646,9 +668,9 @@ namespace AssetStudioMobile
                                           "last-report.txt"),
             };
 
-            // The kind decides which object types are worth building; see Extractor.FilterFor.
+            // The categories decide which object types are worth building; see Extractor.FiltersFor.
             ApplyDecryptor(_extractor);
-            _extractor.Load(_inputDir, (ExportKind)_panel.Kind.SelectedItemPosition);
+            _extractor.Load(_inputDir, _categories);
 
             // A tree too big to hold is not read until Export asks for it, so there are no object
             // counts to show yet, only what the scan recognised.
@@ -659,7 +681,7 @@ namespace AssetStudioMobile
                     : $"{_extractor.CandidateCount} candidate file(s) -- will be read on export");
         }
 
-        private void Export(int kindIndex, bool overwrite)
+        private void Export(bool overwrite)
         {
             if (_extractor == null)
             {
@@ -668,43 +690,71 @@ namespace AssetStudioMobile
                 return;
             }
 
-            // The load was filtered to one kind's types, so exporting something else has to go back
-            // through the loader. The filter only ever widens (SetAssetFilter unions), so it cannot
-            // be reset on a live AssetsManager -- Scan() builds a fresh one.
-            if (_extractor.LoadedKind != (ExportKind)kindIndex)
+            // The load was narrowed to whatever categories were selected when it ran, so exporting a
+            // different set has to go back through the loader -- the manager's filter cannot be
+            // widened once set.
+            if (!SameCategories(_extractor.LoadedCategories, _categories))
             {
-                Append($"export kind changed to {(ExportKind)kindIndex}, reloading");
+                Append($"categories changed to {SelectionTag()}, reloading");
                 Scan();
                 if (_extractor == null) return;
             }
 
             var options = new ExportOptions
             {
-                Kind = (ExportKind)kindIndex,
+                Mode = _mode,
+                Categories = _categories.ToArray(),
                 Overwrite = overwrite,
             };
 
-            var baseDir = string.IsNullOrWhiteSpace(_panel.OutputPath?.Text)
-                ? _outputDir
-                : _panel.OutputPath.Text.Trim();
-            var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            var dest = Path.Combine(baseDir, $"{options.Kind}_{stamp}");
-            Append($"Exporting {options.Kind} -> {dest}");
+            var dest = OutputDirectory();
+            Append($"Exporting {SelectionTag()} -> {dest}");
 
             var report = _extractor.Export(dest, options);
             Append(report.ToString());
-
             foreach (var e in report.Errors.Take(20)) Append("  " + e);
             SetStatus($"Exported {report.Exported}/{report.Matched} -> {Path.GetFileName(dest)}");
         }
 
-        // ---------------- plumbing ----------------
+        /// <summary>Writes the objects the browser's index selected, loading each file once.</summary>
+        private void ExportFiltered(IReadOnlyList<Extractor.IndexEntry> entries, bool overwrite)
+        {
+            if (_extractor == null || entries == null || entries.Count == 0) return;
 
-        /// <summary>
-        /// Opens the browser on the batches the scan produced. Loading is one batch at a time
-        /// because the objects have to stay resident to be previewed, and the whole tree does not
-        /// fit in memory -- the same reason Export batches, walked instead of hidden.
-        /// </summary>
+            var options = new ExportOptions { Mode = _mode, Overwrite = overwrite };
+            var dest = OutputDirectory();
+
+            Append($"Exporting {entries.Count} filtered object(s) -> {dest}");
+            var report = _extractor.ExportIndexed(entries, dest, options);
+            Append(report.ToString());
+            foreach (var e in report.Errors.Take(20)) Append("  " + e);
+            SetStatus($"Exported {report.Exported}/{report.Matched} -> {Path.GetFileName(dest)}");
+        }
+
+        private string OutputDirectory()
+        {
+            var baseDir = string.IsNullOrWhiteSpace(_panel.OutputPath?.Text)
+                ? _outputDir
+                : _panel.OutputPath.Text.Trim();
+            return Path.Combine(baseDir, $"{SelectionTag()}_{DateTime.Now:yyyyMMdd_HHmmss}");
+        }
+
+        /// <summary>A short, file-name-safe tag for what is selected, for the output directory.</summary>
+        private string SelectionTag()
+        {
+            if (_categories.Count == 0) return _mode.ToString();
+            if (_categories.Count == Extractor.Categories.Length) return "All";
+
+            var names = Extractor.Categories.Where(_categories.Contains).Select(k => k.ToString());
+            return $"{_mode}_{string.Join("-", names)}";
+        }
+
+        private static bool SameCategories(IReadOnlyCollection<ExportKind> loaded, ICollection<ExportKind> selected)
+        {
+            var left = loaded ?? Array.Empty<ExportKind>();
+            return left.Count == selected.Count && left.All(selected.Contains);
+        }
+
         private void OpenBrowser()
         {
             if (_extractor == null || _extractor.BatchCount == 0)
@@ -727,6 +777,14 @@ namespace AssetStudioMobile
             _browser.ExportRequested += target => RunOnBackground(() => ExportSingle(target));
             _browser.IndexRequested += kinds => RunOnBackground(() => BuildIndex(kinds));
             _browser.IndexedRequested += entry => RunOnBackground(() => ShowIndexed(entry));
+            _browser.ExportAllRequested += () => RunOnBackground(() => Export(_panel.Overwrite.Checked));
+            _browser.ExportFilteredRequested += entries =>
+                RunOnBackground(() => ExportFiltered(entries, _panel.Overwrite.Checked));
+            _browser.SelectionChanged += kinds =>
+            {
+                _categories.Clear();
+                foreach (var kind in kinds) _categories.Add(kind);
+            };
 
             SetContentView(Inset(_browser.Root));
             LoadBatchForBrowser(0);
@@ -763,7 +821,7 @@ namespace AssetStudioMobile
 
             var options = new ExportOptions
             {
-                Kind = (ExportKind)_panel.Kind.SelectedItemPosition,
+                Mode = _mode,
 
                 // The directory is new each time, so there is nothing to protect by skipping.
                 Overwrite = true,
@@ -772,7 +830,7 @@ namespace AssetStudioMobile
             var baseDir = string.IsNullOrWhiteSpace(_panel.OutputPath?.Text)
                 ? _outputDir
                 : _panel.OutputPath.Text.Trim();
-            var dest = Path.Combine(baseDir, $"{options.Kind}_{DateTime.Now:yyyyMMdd_HHmmss}");
+            var dest = Path.Combine(baseDir, $"{options.Mode}_{DateTime.Now:yyyyMMdd_HHmmss}");
 
             var name = (target as NamedObject)?.m_Name;
             if (string.IsNullOrEmpty(name)) name = $"pathID {target.m_PathID}";
