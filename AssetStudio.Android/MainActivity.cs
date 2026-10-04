@@ -119,6 +119,7 @@ namespace AssetStudioMobile
 
             _panel.SelfTestRequested += () => RunOnBackground(() => SelfTest.AppendResults(Append));
             _panel.BrowseRequested += OpenBrowser;
+            _panel.ManageFilesRequested += OpenFiles;
             _panel.PickScriptRequested += PickScript;
             _panel.ClearScriptRequested += ClearScript;
 
@@ -759,6 +760,26 @@ namespace AssetStudioMobile
             return left.Count == selected.Count && left.All(selected.Contains);
         }
 
+        /// <summary>
+        /// Opens the file manager at the app's own files directory -- the one holding staged
+        /// bundles, staged APKs and decrypted copies, and the one nothing else on the device can
+        /// clean up.
+        /// </summary>
+        private void OpenFiles()
+        {
+            var root = FilesRoot();
+            Directory.CreateDirectory(root);
+
+            var panel = new FilesPanel(this, root, RunOnBackground, RunOnUiThread);
+            panel.Closed += () => SetContentView(_mainRoot);
+            SetContentView(Inset(panel.Root));
+        }
+
+        /// <summary>
+        /// Opens the browser on the batches the scan produced. Loading is one batch at a time
+        /// because the objects have to stay resident to be previewed, and the whole tree does not
+        /// fit in memory -- the same reason Export batches, walked instead of hidden.
+        /// </summary>
         private void OpenBrowser()
         {
             if (_extractor == null || _extractor.BatchCount == 0)

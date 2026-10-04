@@ -68,6 +68,13 @@ namespace AssetStudioMobile.Ui
         public event Action ScanRequested;
         public event Action SelfTestRequested;
         public event Action BrowseRequested;
+
+        /// <summary>
+        /// Manage the app's own directories. On Android 11+ nothing else can: Android/data is closed
+        /// to file managers, to other apps and to the system UI, so staged copies pile up with no way
+        /// to remove them short of Shizuku or adb.
+        /// </summary>
+        public event Action ManageFilesRequested;
         public event Action PickScriptRequested;
         public event Action ClearScriptRequested;
 
@@ -119,6 +126,10 @@ namespace AssetStudioMobile.Ui
             var browse = new Button(activity) { Text = "浏览 / 预览" };
             browse.Click += (_, _) => BrowseRequested?.Invoke();
             root.AddView(browse);
+
+            var manage = new Button(activity) { Text = "管理文件" };
+            manage.Click += (_, _) => ManageFilesRequested?.Invoke();
+            root.AddView(manage);
 
             // Encrypted bundles are a per-game scheme, so the tool takes the scheme as a script
             // rather than pretending to know it.
