@@ -40,6 +40,15 @@ namespace AssetStudioMobile
         /// <summary>VideoClips, as whatever container the file holds.</summary>
         Video,
 
+        /// <summary>
+        /// Everything the categories above do not cover: GameObjects, Transforms, CanvasRenderers,
+        /// MonoScripts, Materials and the rest of the scene-side objects.
+        ///
+        /// Without it, selecting every category still showed 4211 of the 10706 objects in a test
+        /// game and there was no way to see or explain the other 6495.
+        /// </summary>
+        Other,
+
         JsonDump,
         RawData,
 
@@ -243,11 +252,12 @@ namespace AssetStudioMobile
             ExportKind.MonoBehaviour,
             ExportKind.Font,
             ExportKind.Video,
+            ExportKind.Other,
         };
 
         /// <summary>Human labels, in the same order as <see cref="Categories"/>.</summary>
         public static readonly string[] CategoryLabels =
-            { "贴图", "Sprite", "网格", "文本", "音频", "脚本", "字体", "视频" };
+            { "贴图", "Sprite", "网格", "文本", "音频", "脚本", "字体", "视频", "其它" };
 
         /// <summary>True when an object is in any of the selected categories.</summary>
         internal static bool MatchesAny(AssetStudio.Object o, IReadOnlyCollection<ExportKind> kinds)
@@ -270,9 +280,27 @@ namespace AssetStudioMobile
             return ExportKind.Auto;
         }
 
+        /// <summary>True when a category other than Other claims this object.</summary>
+        private static bool IsCategorised(AssetStudio.Object o)
+        {
+            foreach (var kind in Categories)
+            {
+                if (kind == ExportKind.Other) continue;
+                if (Matches(o, kind)) return true;
+            }
+            return false;
+        }
+
         /// <summary>The loader filter for a set of categories, or null when there is nothing to narrow to.</summary>
         private static ClassIDType[] FiltersFor(IEnumerable<ExportKind> kinds)
         {
+            // Other cannot be expressed as a set of type ids -- it is everything except the others --
+            // so asking for it means reading every type.
+            foreach (var kind in kinds)
+            {
+                if (kind == ExportKind.Other) return null;
+            }
+
             var set = new HashSet<ClassIDType>();
             foreach (var kind in kinds)
             {
@@ -304,6 +332,7 @@ namespace AssetStudioMobile
             if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
 
             LoadedKind = kind;
+            _indexedCandidate = -1;
             _assetsManager.LoadViaTypeTree = UseTypeTree;
 
             // Cleared first: SetAssetFilter only unions into its set, so setting a second kind
@@ -398,6 +427,9 @@ namespace AssetStudioMobile
         }
 
         private string _lastParent;
+
+        /// <summary>Which candidate is currently materialised for the index, or -1.</summary>
+        private int _indexedCandidate = -1;
 
         /// <summary>The batch split the scan produced, kept so browsing can walk it.</summary>
         private List<(int Start, int Count)> _batches;
@@ -504,8 +536,15 @@ namespace AssetStudioMobile
         {
             if (entry == null || _candidates == null) return null;
 
-            _assetsManager.Clear();
-            LoadBatch(entry.Candidate, 1);
+            // The index holds no objects, so opening one means loading its file. Re-loading it for
+            // the next entry from the same file would make browsing by index feel slow for no
+            // reason: a batch is sixty-odd bundles and several entries usually share one.
+            if (_indexedCandidate != entry.Candidate)
+            {
+                _assetsManager.Clear();
+                LoadBatch(entry.Candidate, 1);
+                _indexedCandidate = entry.Candidate;
+            }
 
             foreach (var file in _assetsManager.AssetsFileList)
             {
@@ -532,6 +571,7 @@ namespace AssetStudioMobile
             if (index < 0 || index >= _batches.Count) return Array.Empty<Object>();
 
             _assetsManager.Clear();
+            _indexedCandidate = -1;
 
             // Browsing wants every type it can show, not whatever the last export narrowed the load
             // to, and the manager's filter cannot be widened once set.
@@ -1162,6 +1202,11 @@ namespace AssetStudioMobile
             ExportKind.MonoBehaviour => o is MonoBehaviour,
             ExportKind.Font => o is Font f && f.m_FontData != null && f.m_FontData.Length > 0,
             ExportKind.Video => o is VideoClip v && v.m_VideoData != null && v.m_ExternalResources.m_Size > 0,
+
+            // Deliberately last and defined as "none of the others", so the categories partition the
+            // tree: selecting all of them is everything, and adding a category later cannot silently
+            // steal objects from this one.
+            ExportKind.Other => !IsCategorised(o),
             ExportKind.Texture => o is Texture2D t && t.m_Width > 0 && t.m_Height > 0,
             ExportKind.Sprite => o is Sprite s && s.m_Rect.width > 0 && s.m_Rect.height > 0,
             ExportKind.Mesh => o is Mesh,
@@ -1515,6 +1560,7 @@ namespace AssetStudioMobile
         /// </summary>
         public void Clear()
         {
+            _indexedCandidate = -1;
             _assetsManager.Clear();
             _candidates = null;
             _released = false;
