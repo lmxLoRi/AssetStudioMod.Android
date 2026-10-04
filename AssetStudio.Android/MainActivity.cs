@@ -725,9 +725,12 @@ namespace AssetStudioMobile
                 return;
             }
 
-            _browser = new PreviewPanel(this, _extractor.BatchCount);
+            _browser = new PreviewPanel(this, _extractor.BatchCount, RunOnBackground, RunOnUiThread);
             _browser.Closed += () =>
             {
+                // The player holds a decoder on the clip that is open; leaving it running would keep
+                // it alive behind the export screen.
+                _browser.StopAudio();
                 _browser = null;
                 SetContentView(_mainRoot);
             };

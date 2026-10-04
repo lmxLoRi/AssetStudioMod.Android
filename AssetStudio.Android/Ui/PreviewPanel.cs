@@ -4,9 +4,11 @@ using System.Linq;
 using System.Text;
 using Android.Content;
 using Android.Graphics;
+using Android.Media;
 using Android.Views;
 using Android.Widget;
 using AssetStudio;
+using Path = System.IO.Path;
 using Object = AssetStudio.Object;
 
 namespace AssetStudioMobile.Ui
@@ -43,6 +45,9 @@ namespace AssetStudioMobile.Ui
 
         private readonly Context _context;
         private readonly int _batchCount;
+        private readonly Action<Action> _background;
+        private readonly Action<Action> _ui;
+        private readonly string _cacheDirectory;
         private readonly LinearLayout _page;
         private readonly TextView _title;
         private readonly Button _previous;
@@ -52,11 +57,17 @@ namespace AssetStudioMobile.Ui
 
         private readonly List<Object> _items = new List<Object>();
         private int _batch;
+        private int _token;
+        private MediaPlayer _player;
 
-        public PreviewPanel(Context context, int batchCount)
+        public PreviewPanel(Context context, int batchCount, Action<Action> background, Action<Action> ui)
         {
             _context = context;
             _batchCount = Math.Max(1, batchCount);
+            _background = background ?? (work => work());
+            _ui = ui ?? (work => work());
+            _cacheDirectory = context.CacheDir?.AbsolutePath
+                              ?? Path.Combine(Path.GetTempPath(), "assetstudio-preview");
 
             _title = UiKit.Label(context, "", 14, bold: true);
             _previous = UiKit.Button(context, "◀ 上一批", () => BatchRequested?.Invoke(_batch - 1));
@@ -71,7 +82,7 @@ namespace AssetStudioMobile.Ui
                 if (position >= 0 && position < _items.Count) Show(_items[position]);
             };
 
-            _page = new LinearLayout(context) { Orientation = Orientation.Vertical };
+            _page = new LinearLayout(context) { Orientation = Android.Widget.Orientation.Vertical };
             _page.AddView(UiKit.Fill(_list));
 
             Root = UiKit.Column(context,
@@ -83,7 +94,8 @@ namespace AssetStudioMobile.Ui
         }
 
         /// <summary>Only these can be shown; everything else would be a dead row that does nothing.</summary>
-        public static bool IsPreviewable(Object o) => o is Texture2D || o is Sprite || o is TextAsset;
+        public static bool IsPreviewable(Object o)
+            => o is Texture2D || o is Sprite || o is TextAsset || o is AudioClip;
 
         public void SetBatch(int index, IReadOnlyList<Object> objects)
         {
@@ -116,6 +128,8 @@ namespace AssetStudioMobile.Ui
 
         private void ShowList()
         {
+            _token++;
+            StopAudio();
             _page.RemoveAllViews();
             _page.AddView(UiKit.Fill(_list));
         }
@@ -138,6 +152,12 @@ namespace AssetStudioMobile.Ui
 
         private void Show(Object o)
         {
+            // Anything asynchronous checks this before touching the screen: the user can leave while
+            // an audio conversion is still running, and the result would otherwise land on whatever
+            // page replaced it.
+            _token++;
+            StopAudio();
+
             try
             {
                 switch (o)
@@ -151,6 +171,9 @@ namespace AssetStudioMobile.Ui
                     case Sprite sprite:
                         ShowPage(Page(Describe(o), ImageBody(SpriteBitmap(sprite))));
                         return;
+                    case AudioClip audio:
+                        ShowAudio(audio);
+                        return;
                     default:
                         ShowPage(Page(Describe(o), TextBody("这个类型还没有预览。")));
                         return;
@@ -162,6 +185,100 @@ namespace AssetStudioMobile.Ui
                 // down with it; the message is more use than a crash.
                 ShowPage(Page(Describe(o), TextBody("预览失败：" + ex.Message)));
             }
+        }
+
+        /// <summary>
+        /// Converting an AudioClip is FMOD decoding real data, so it runs off the UI thread and the
+        /// page is swapped in when it is ready.
+        /// </summary>
+        private void ShowAudio(AudioClip clip)
+        {
+            var token = _token;
+            var title = Describe(clip);
+            ShowPage(Page(title, TextBody("正在转换音频…")));
+
+            _background(() =>
+            {
+                string path = null;
+                string error = null;
+                try
+                {
+                    path = AudioCache.WavFor(clip, _cacheDirectory, out error);
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                }
+
+                _ui(() =>
+                {
+                    if (token != _token) return;
+                    ShowPage(Page(title, AudioBody(clip, path, error)));
+                });
+            });
+        }
+
+        private View AudioBody(AudioClip clip, string path, string error)
+        {
+            var info = UiKit.Caption(_context,
+                $"{clip.m_Channels} 声道 · {clip.m_Frequency} Hz · {clip.m_Length:F1} 秒 · {clip.m_CompressionFormat}");
+
+            if (path == null)
+            {
+                return UiKit.Column(_context, info, TextBody("无法播放：" + (error ?? "未知原因")));
+            }
+
+            var button = UiKit.Button(_context, "▶ 播放", () => { });
+            try
+            {
+                _player = new MediaPlayer();
+                _player.SetDataSource(path);
+                _player.Prepare();
+                _player.Completion += (_, _) => button.Text = "▶ 播放";
+            }
+            catch (Exception ex)
+            {
+                StopAudio();
+                return UiKit.Column(_context, info, TextBody("MediaPlayer 打不开：" + ex.Message));
+            }
+
+            button.Click += (_, _) =>
+            {
+                if (_player == null) return;
+                if (_player.IsPlaying)
+                {
+                    _player.Pause();
+                    button.Text = "▶ 继续";
+                }
+                else
+                {
+                    _player.Start();
+                    button.Text = "⏸ 暂停";
+                }
+            };
+
+            return UiKit.Column(_context, info, button,
+                                UiKit.Caption(_context, Path.GetFileName(path)));
+        }
+
+        /// <summary>Also called by the owner when the panel closes.</summary>
+        public void StopAudio()
+        {
+            if (_player == null) return;
+
+            try
+            {
+                if (_player.IsPlaying) _player.Stop();
+            }
+            catch
+            {
+                // A player that is already in an error state throws on stop; releasing it is what
+                // actually matters.
+            }
+
+            _player.Release();
+            _player.Dispose();
+            _player = null;
         }
 
         private View ImageBody(Bitmap bitmap)
