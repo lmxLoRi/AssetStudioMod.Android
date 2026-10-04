@@ -303,7 +303,7 @@ namespace AssetStudioMobile.Ui
                 string error = null;
                 try
                 {
-                    path = AudioCache.WavFor(clip, _cacheDirectory, out error);
+                    path = AudioCache.FileFor(clip, _cacheDirectory, out error);
                 }
                 catch (Exception ex)
                 {

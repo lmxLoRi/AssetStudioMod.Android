@@ -38,4 +38,8 @@
     <ProjectReference Include="..\AssetStudioUtility\AssetStudioUtility.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Fmod5Sharp" Version="3.1.0" />
+  </ItemGroup>
+
 </Project>
