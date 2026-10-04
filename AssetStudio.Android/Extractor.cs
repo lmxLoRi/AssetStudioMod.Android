@@ -317,8 +317,15 @@ namespace AssetStudioMobile
             if (index < 0 || index >= _batches.Count) return Array.Empty<Object>();
 
             _assetsManager.Clear();
-            _released = false;
 
+            // Browsing wants every type it can show, not whatever the last export narrowed the load
+            // to, and the manager's filter cannot be widened once set.
+            _assetsManager.ClearAssetFilter();
+
+            // _released is deliberately left alone. It is what tells Export whether the tree fit in
+            // one batch and is therefore still in _assetsManager, and browsing replaces that with a
+            // single batch. Clearing it here would make Export take the single-batch path and
+            // silently write only the batch that was last looked at.
             var (start, count) = _batches[index];
             LoadBatch(start, count);
 

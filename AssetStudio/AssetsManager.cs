@@ -85,6 +85,16 @@ namespace AssetStudio
             SetAssetFilter(classIDTypeList.ToArray());
         }
 
+        /// <summary>
+        /// Removes the type filter, so every type is read again.
+        ///
+        /// SetAssetFilter only ever unions into its set, which is right for a load that happens once
+        /// and wrong for anything that wants to widen the filter back out. The Android preview
+        /// needs exactly that: it shares a manager with an export that may have narrowed the load to
+        /// a single type, and browsing has to see every type it can show.
+        /// </summary>
+        public void ClearAssetFilter() => filteredAssetTypesList.Clear();
+
         public void LoadFilesAndFolders(params string[] paths)
         {
             LoadFilesAndFolders(out _, paths.ToList());
