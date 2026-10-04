@@ -73,10 +73,18 @@ namespace AssetStudioMobile.Ui
         private int _token;
         private MediaPlayer _player;
 
+        // The audio page's own controls, held so the ticker can update them and so StopAudio can
+        // stop updating a page that is no longer on screen.
+        private SeekBar _audioBar;
+        private TextView _audioTime;
+        private readonly Android.OS.Handler _ticker = new Android.OS.Handler(Android.OS.Looper.MainLooper);
+        private readonly Java.Lang.Runnable _tick;
+
         public PreviewPanel(Context context, int batchCount, Action<Action> background, Action<Action> ui)
         {
             _context = context;
             _batchCount = Math.Max(1, batchCount);
+            _tick = new Java.Lang.Runnable(TickAudio);
             _background = background ?? (work => work());
             _ui = ui ?? (work => work());
             _cacheDirectory = context.CacheDir?.AbsolutePath
@@ -329,12 +337,34 @@ namespace AssetStudioMobile.Ui
             }
 
             var button = UiKit.Button(_context, "▶ 播放", () => { });
+
+            // A four minute track with only a play button gives no sense of where it is. The bar is
+            // a SeekBar, so it also scrubs.
+            _audioBar = new SeekBar(_context) { Max = ProgressScale, Progress = 0 };
+            _audioBar.ProgressChanged += (_, e) =>
+            {
+                if (!e.FromUser || _player == null) return;
+                try
+                {
+                    var duration = _player.Duration;
+                    if (duration > 0) _player.SeekTo((int)((long)duration * e.Progress / ProgressScale));
+                }
+                catch
+                {
+                    // Seeking on a player that is still preparing or has already gone away throws;
+                    // the ticker will put the bar back where the player actually is.
+                }
+            };
+
+            _audioTime = UiKit.Caption(_context, "");
+
             try
             {
                 _player = new MediaPlayer();
                 _player.SetDataSource(path);
                 _player.Prepare();
                 _player.Completion += (_, _) => button.Text = "▶ 播放";
+                StartTicker();
             }
             catch (Exception ex)
             {
@@ -357,13 +387,59 @@ namespace AssetStudioMobile.Ui
                 }
             };
 
-            return UiKit.Column(_context, info, button,
+            return UiKit.Column(_context, info, button, _audioBar, _audioTime,
                                 UiKit.Caption(_context, Path.GetFileName(path)));
+        }
+
+        /// <summary>Resolution of the SeekBar; milliseconds do not fit an int bar.</summary>
+        private const int ProgressScale = 1000;
+
+        private void StartTicker()
+        {
+            _ticker.RemoveCallbacks(_tick);
+            _ticker.PostDelayed(_tick, 250);
+        }
+
+        private void TickAudio()
+        {
+            if (_player == null || _audioBar == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var duration = _player.Duration;
+                var position = _player.CurrentPosition;
+                if (duration > 0)
+                {
+                    _audioBar.Max = ProgressScale;
+                    _audioBar.Progress = (int)Math.Min(ProgressScale, 1000L * position / duration);
+                    _audioTime.Text = $"{Clock(position)} / {Clock(duration)}";
+                }
+            }
+            catch
+            {
+                // Duration and CurrentPosition both throw once the player is released; the page
+                // changing calls StopAudio, so losing one tick is not worth reporting.
+            }
+
+            _ticker.PostDelayed(_tick, 250);
+        }
+
+        private static string Clock(int milliseconds)
+        {
+            var total = milliseconds / 1000;
+            return $"{total / 60}:{total % 60:D2}";
         }
 
         /// <summary>Also called by the owner when the panel closes.</summary>
         public void StopAudio()
         {
+            _ticker.RemoveCallbacks(_tick);
+            _audioBar = null;
+            _audioTime = null;
+
             if (_player == null) return;
 
             try
