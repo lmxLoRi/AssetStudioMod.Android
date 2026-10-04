@@ -29,6 +29,7 @@ namespace AssetStudioMobile
         private View _mainRoot;
 
         private PreviewPanel _browser;
+        private AppPickerPanel _appPicker;
 
         /// <summary>One batch load at a time: BrowseBatch reuses the extractor's manager.</summary>
         private bool _browsing;
@@ -102,6 +103,14 @@ namespace AssetStudioMobile
             if (Intent?.GetStringExtra("dumpastc") != null || Intent?.GetIntExtra("dumpastc", 0) > 0)
                 InstallAstcDump();
 
+            // Shizuku answers asynchronously, and only if the service was running when the request
+            // was made. Without this the grant would arrive with nothing to show for it.
+            ShizukuBridge.PermissionResult = (_, granted) => RunOnUiThread(() =>
+            {
+                Append(granted == 0 ? "Shizuku 已授权" : "Shizuku 授权被拒绝");
+                RefreshPermissionUi();
+            });
+
             RunIntentAction(Intent);
         }
 
@@ -109,7 +118,7 @@ namespace AssetStudioMobile
         {
             _panel = new ExportPanel(this);
 
-            _panel.ShizukuRequested += () => ShizukuBridge.RequestPermission();
+            _panel.ShizukuRequested += RequestShizuku;
             _panel.GrantRequested += RequestAllFilesAccess;
             _panel.LoadRequested += LoadFromPathField;
             _panel.PickFolderRequested += PickTree;
@@ -503,25 +512,62 @@ namespace AssetStudioMobile
                 var apps = ApkImport.ListInstalled(this, Append);
                 if (apps.Count == 0)
                 {
-                    Append("no installed apps are visible; QUERY_ALL_PACKAGES is declared, so this " +
-                           "would be a package-visibility surprise worth reporting");
+                    Append("没有可以看到的已安装应用。QUERY_ALL_PACKAGES 已经声明，所以这属于包可见性问题，值得反馈。");
                     return;
                 }
 
-                var labels = new string[apps.Count];
-                for (var i = 0; i < apps.Count; i++) labels[i] = apps[i].ToString();
-
-                RunOnUiThread(() =>
+                _appPicker = new AppPickerPanel(this, apps);
+                _appPicker.Closed += () =>
                 {
-                    new AlertDialog.Builder(this)
-                        .SetTitle("从已安装应用导出")
-                        .SetItems(labels, (_, e) =>
-                        {
-                            if (e.Which >= 0 && e.Which < apps.Count) ImportInstalledApp(apps[e.Which]);
-                        })
-                        .Show();
-                });
+                    _appPicker = null;
+                    SetContentView(_mainRoot);
+                };
+                _appPicker.Chosen += app =>
+                {
+                    _appPicker = null;
+                    SetContentView(_mainRoot);
+                    ImportInstalledApp(app);
+                };
+
+                RunOnUiThread(() => SetContentView(Inset(_appPicker.Root)));
             });
+        }
+
+        /// <summary>
+        /// The Shizuku button.
+        ///
+        /// Asking for permission while the service is stopped does nothing at all -- no dialog, no
+        /// error, nothing to see -- so the state is checked first and every outcome is said out loud.
+        /// </summary>
+        private void RequestShizuku()
+        {
+            var state = ShizukuBridge.State;
+
+            if (state == ShizukuState.NotRunning || state == ShizukuState.NotInstalled)
+            {
+                var missing = state == ShizukuState.NotInstalled;
+                var message = missing
+                    ? "没有安装 Shizuku。装上并启动它之后，这个应用才能以 shell 身份读取 /sdcard/Android/data。"
+                    : "Shizuku 服务没有运行。先在 Shizuku 应用里启动它，再回来点这个按钮。";
+
+                Append(message);
+                SetStatus(missing ? "未安装 Shizuku" : "Shizuku 服务未运行");
+
+                new AlertDialog.Builder(this)
+                    .SetTitle("Shizuku")
+                    .SetMessage(message)
+                    .SetPositiveButton("打开 Shizuku", (_, _) =>
+                    {
+                        if (!ShizukuBridge.OpenManager(this)) Append("打不开 Shizuku 应用，可能没有安装。");
+                    })
+                    .SetNegativeButton("知道了", (_, _) => { })
+                    .Show();
+                return;
+            }
+
+            var reply = ShizukuBridge.RequestPermission();
+            Append(reply);
+            SetStatus(reply);
         }
 
         private void ImportInstalledApp(ApkImport.InstalledApp app)

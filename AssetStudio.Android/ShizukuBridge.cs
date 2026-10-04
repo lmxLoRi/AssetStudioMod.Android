@@ -64,11 +64,11 @@ namespace AssetStudioMobile
                 case ShizukuState.Ready:
                     return $"Shizuku：已就绪（uid {SafeUid()}）";
                 case ShizukuState.PermissionDenied:
-                    return "Shizuku: running, permission not granted to this app";
+                    return "Shizuku：服务在跑，但本应用没有授权";
                 case ShizukuState.NotRunning:
-                    return "Shizuku: installed but not running";
+                    return "Shizuku：已安装，但服务没有运行";
                 default:
-                    return "Shizuku: not installed";
+                    return "Shizuku：没有安装";
             }
         }
 
@@ -77,10 +77,83 @@ namespace AssetStudioMobile
             try { return Shizuku.Uid.ToString(); } catch { return "?"; }
         }
 
-        public static void RequestPermission()
+        /// <summary>Any value; it comes back on the result listener.</summary>
+        private const int PermissionRequestCode = 0x5348;
+
+        /// <summary>Raised with (requestCode, grantResult) when Shizuku answers.</summary>
+        public static Action<int, int> PermissionResult;
+
+        private static ResultListener _listener;
+
+        /// <summary>
+        /// Asks Shizuku for permission and returns a sentence saying what happened, because the call
+        /// itself says nothing.
+        ///
+        /// RequestPermission only does anything while the service is running. With it stopped there
+        /// is no binder to talk to: the call returns immediately, nothing appears, and the button
+        /// looks broken -- which is exactly what it looked like on a device where Shizuku had not
+        /// been started. So the state is checked first and the caller is given something to show.
+        /// </summary>
+        public static string RequestPermission()
         {
-            try { Shizuku.RequestPermission(0); }
-            catch (Exception ex) { Android.Util.Log.Warn("ShizukuBridge", "requestPermission: " + ex.Message); }
+            switch (State)
+            {
+                case ShizukuState.NotInstalled:
+                    return "没有安装 Shizuku";
+                case ShizukuState.NotRunning:
+                    return "Shizuku 服务没有运行，请先在 Shizuku 应用里启动它";
+                case ShizukuState.Ready:
+                    return "已经授权过了";
+            }
+
+            try
+            {
+                Listen();
+                Shizuku.RequestPermission(PermissionRequestCode);
+
+                return Shizuku.ShouldShowRequestPermissionRationale()
+                    ? "之前拒绝过，已重新发送请求，请在通知栏里允许"
+                    : "已发送授权请求，请在通知栏里允许";
+            }
+            catch (Exception ex)
+            {
+                return "请求授权失败：" + ex.Message;
+            }
+        }
+
+        /// <summary>
+        /// Starts the Shizuku app, so "the service is not running" has somewhere to go. False when
+        /// it cannot be launched, which means it is not installed.
+        /// </summary>
+        public static bool OpenManager(Android.Content.Context context)
+        {
+            try
+            {
+                var intent = context?.PackageManager?.GetLaunchIntentForPackage(ManagerPkg);
+                if (intent == null) return false;
+
+                intent.AddFlags(Android.Content.ActivityFlags.NewTask);
+                context.StartActivity(intent);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void Listen()
+        {
+            if (_listener != null) return;
+
+            _listener = new ResultListener();
+            Shizuku.AddRequestPermissionResultListener(_listener);
+        }
+
+        private sealed class ResultListener : Java.Lang.Object, Shizuku.IOnRequestPermissionResultListener
+        {
+            public void OnRequestPermissionResult(int requestCode, int grantResult)
+                => PermissionResult?.Invoke(requestCode, grantResult);
         }
 
         private static IShizukuService GetService()

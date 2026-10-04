@@ -105,7 +105,7 @@ namespace AssetStudioMobile
             {
                 var u = new List<string>();
                 foreach (var kv in Unexported) u.Add($"{kv.Key}={kv.Value}");
-                parts.Add("no exporter: " + string.Join(",", u));
+                parts.Add("没有导出器：" + string.Join(",", u));
             }
             return $"匹配={Matched} 导出={Exported} 跳过={Skipped} 失败={Failed} [{string.Join(" ", parts)}]";
         }
@@ -378,7 +378,7 @@ namespace AssetStudioMobile
             {
                 var decryptMark = Stopwatch.GetTimestamp();
                 everything = DecryptAll(everything);
-                LogInfo($"lua: {Decryptor.Name} ran over {everything.Length} file(s) " +
+                LogInfo($"lua：{Decryptor.Name} 跑过 {everything.Length} 个文件 " +
                         $"({(Stopwatch.GetTimestamp() - decryptMark) * 1000 / Stopwatch.Frequency} ms)");
             }
 
@@ -475,7 +475,7 @@ namespace AssetStudioMobile
         public List<IndexEntry> BuildIndex(IReadOnlyCollection<ExportKind> kinds,
                                            Action<int, int> progress, Func<bool> cancelled)
         {
-            if (_candidates == null) throw new InvalidOperationException("Scan a folder first.");
+            if (_candidates == null) throw new InvalidOperationException("请先扫描一个文件夹。");
             if (_batches == null) _batches = new List<(int Start, int Count)>(Batches(_candidates));
 
             // The manager was loaded with a filter that cannot be widened, so it is replaced rather
@@ -575,7 +575,7 @@ namespace AssetStudioMobile
         /// </summary>
         public IReadOnlyList<Object> BrowseBatch(int index)
         {
-            if (_candidates == null) throw new InvalidOperationException("Scan a folder first.");
+            if (_candidates == null) throw new InvalidOperationException("请先扫描一个文件夹。");
             if (_batches == null) _batches = new List<(int Start, int Count)>(Batches(_candidates));
             if (index < 0 || index >= _batches.Count) return Array.Empty<Object>();
 
@@ -608,7 +608,7 @@ namespace AssetStudioMobile
 
             // Accumulated here, not discarded. Since LoadBatch grew a static overload for the
             // parallel workers this one quietly dropped its out parameters, so every single-batch
-            // load reported "Loaded 0 serialized file(s)" no matter how much it had actually read.
+            // load reported "已加载 0 个序列化文件" no matter how much it had actually read.
             _lastParent = parent;
             _loadedFiles += files;
             _loadedObjects += objects;
@@ -761,7 +761,7 @@ namespace AssetStudioMobile
 
                         // One broken file is usually every file; a bounded number of lines says so
                         // without burying the log.
-                        if (failed <= 5) LogWarn($"lua: {Path.GetFileName(file)}: {error}");
+                        if (failed <= 5) LogWarn($"lua：{Path.GetFileName(file)}：{error}");
                     }
                     continue;
                 }
@@ -1361,7 +1361,7 @@ namespace AssetStudioMobile
                         Write = (obj, dest, opt) =>
                         {
                             if (!mesh.ExportObj(dest))
-                                throw new InvalidOperationException("mesh has no usable geometry");
+                                throw new InvalidOperationException("网格没有可用的几何数据");
                         },
                     };
 
@@ -1379,7 +1379,7 @@ namespace AssetStudioMobile
                     var payload = AudioCodec.Convert(clip, out var audioExtension, out var audioError);
                     if (payload == null)
                     {
-                        throw new InvalidOperationException(audioError ?? "audio conversion failed");
+                        throw new InvalidOperationException(audioError ?? "音频转换失败");
                     }
 
                     var bytes = payload;

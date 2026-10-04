@@ -46,7 +46,7 @@ namespace AssetStudioMobile
             }
             catch (Exception ex)
             {
-                log?.Invoke($"cannot list packages: {ex.GetType().Name}: {ex.Message}");
+                log?.Invoke($"列不出软件包：{ex.GetType().Name}: {ex.Message}");
                 return result;
             }
 
@@ -77,7 +77,7 @@ namespace AssetStudioMobile
                 return string.Compare(a.Label, b.Label, StringComparison.CurrentCultureIgnoreCase);
             });
 
-            log?.Invoke($"found {result.Count} installed app(s)");
+            log?.Invoke($"发现 {result.Count} 个已安装应用");
             return result;
         }
 
@@ -113,24 +113,24 @@ namespace AssetStudioMobile
                     continue;
                 }
 
-                log?.Invoke($"direct read failed ({why}); trying Shizuku");
+                log?.Invoke($"直接读取失败（{why}），改用 Shizuku");
 
                 if (ShizukuBridge.State != ShizukuState.Ready)
                 {
-                    log?.Invoke($"ERROR: cannot read {src}, and Shizuku is not usable ({ShizukuBridge.State})");
+                    log?.Invoke($"错误：读不了 {src}，而且 Shizuku 不可用（{ShizukuBridge.State}）");
                     continue;
                 }
 
                 ShizukuBridge.Run($"cp -f {ShizukuBridge.ShellQuote(src)} {ShizukuBridge.ShellQuote(target)} 2>&1");
                 if (File.Exists(target) && new FileInfo(target).Length > 0) copied++;
-                else log?.Invoke($"ERROR: shizuku could not copy {Path.GetFileName(src)}");
+                else log?.Invoke($"错误：Shizuku 复制 {Path.GetFileName(src)} 失败");
             }
 
             if (copied == 0) return null;
 
             var total = 0L;
             foreach (var f in Directory.GetFiles(dest)) total += new FileInfo(f).Length;
-            log?.Invoke($"staged {copied} APK file(s), {total / 1048576} MB, into {dest}");
+            log?.Invoke($"已暂存 {copied} 个文件（{total / 1048576} MB）到 {dest}");
             return dest;
         }
 
