@@ -11,6 +11,7 @@ using Android.Provider;
 using Android.Views;
 using Android.Widget;
 using AssetStudio;
+using AssetStudioMobile.Ui;
 
 namespace AssetStudioMobile
 {
@@ -23,6 +24,14 @@ namespace AssetStudioMobile
         private TextView _status;
         private TextView _log;
         private ProgressBar _bar;
+
+        /// <summary>Kept so the browser can hand the screen back when it closes.</summary>
+        private View _mainRoot;
+
+        private PreviewPanel _browser;
+
+        /// <summary>One batch load at a time: BrowseBatch reuses the extractor's manager.</summary>
+        private bool _browsing;
         private Button _btnImport;
         private Button _btnGrant;
         private Button _btnShizuku;
@@ -72,7 +81,8 @@ namespace AssetStudioMobile
             // whether to look at the codec, the copy, or the flip.
             Texture2DExtensions.PhaseTiming = Stats.AddPhase;
 
-            SetContentView(BuildUi());
+            _mainRoot = BuildUi();
+            SetContentView(_mainRoot);
             _inputPath.Text = _inputDir;
             _outputPath.Text = _outputDir;
             RefreshPermissionUi();
@@ -134,6 +144,10 @@ namespace AssetStudioMobile
             _btnScan = new Button(this) { Text = "Rescan" };
             _btnScan.Click += (_, __) => RunOnBackground(Scan);
             root.AddView(_btnScan);
+
+            var browse = new Button(this) { Text = "浏览 / 预览" };
+            browse.Click += (_, __) => OpenBrowser();
+            root.AddView(browse);
 
             root.AddView(new TextView(this) { Text = "Export to" });
             _outputPath = new EditText(this) { TextSize = 12f };
@@ -258,6 +272,27 @@ namespace AssetStudioMobile
                     {
                         Append("ERROR: -e path is required for action=load");
                     }
+                    break;
+                }
+                case "browse":
+                {
+                    // Scripted form of the 浏览 button: resolve the path, scan, then open the
+                    // browser. Kind is left at Auto on purpose -- browsing wants every previewable
+                    // type, and a filter would hide the TextAssets and Sprites.
+                    var browsePath = intent.GetStringExtra("path");
+                    RunOnBackground(() =>
+                    {
+                        if (!string.IsNullOrWhiteSpace(browsePath))
+                        {
+                            var readable = ResolveReadable(browsePath);
+                            if (readable == null) return;
+                            _inputDir = readable;
+                            RunOnUiThread(() => _inputPath.Text = readable);
+                        }
+
+                        Scan();
+                        RunOnUiThread(OpenBrowser);
+                    });
                     break;
                 }
                 case "export":
@@ -675,6 +710,79 @@ namespace AssetStudioMobile
         }
 
         // ---------------- plumbing ----------------
+
+        /// <summary>
+        /// Opens the browser on the batches the scan produced. Loading is one batch at a time
+        /// because the objects have to stay resident to be previewed, and the whole tree does not
+        /// fit in memory -- the same reason Export batches, walked instead of hidden.
+        /// </summary>
+        private void OpenBrowser()
+        {
+            if (_extractor == null || _extractor.BatchCount == 0)
+            {
+                SetStatus("先 Scan 一次");
+                Append("先 Scan 一次，再来浏览。");
+                return;
+            }
+
+            _browser = new PreviewPanel(this, _extractor.BatchCount);
+            _browser.Closed += () =>
+            {
+                _browser = null;
+                SetContentView(_mainRoot);
+            };
+            _browser.BatchRequested += LoadBatchForBrowser;
+
+            SetContentView(Inset(_browser.Root));
+            LoadBatchForBrowser(0);
+        }
+
+        /// <summary>
+        /// Wraps a screen root so it is not laid out behind the status bar and toolbar.
+        ///
+        /// Edge-to-edge is the default at targetSdk 35, and the browser hit exactly this: its batch
+        /// buttons were drawn under the title bar, so there was no way to reach any batch but the
+        /// first one. BuildUi does the same for the main screen.
+        /// </summary>
+        private View Inset(View root)
+        {
+            var basePad = (int)(16 * Resources.DisplayMetrics.Density);
+            root.SetPadding(basePad, basePad, basePad, basePad);
+
+            var outer = new FrameLayout(this);
+            outer.AddView(root);
+            if (Build.VERSION.SdkInt >= BuildVersionCodes.R)
+            {
+                outer.SetOnApplyWindowInsetsListener(new InsetListener(root, basePad));
+            }
+            return outer;
+        }
+
+        private void LoadBatchForBrowser(int index)
+        {
+            if (_extractor == null || _browser == null) return;
+            if (index < 0 || index >= _extractor.BatchCount) return;
+            if (_browsing) return;
+
+            _browsing = true;
+            _browser.SetBusy($"正在加载第 {index + 1}/{_extractor.BatchCount} 批…");
+            RunOnBackground(() =>
+            {
+                try
+                {
+                    var objects = _extractor.BrowseBatch(index);
+                    RunOnUiThread(() => _browser?.SetBatch(index, objects));
+                }
+                catch (Exception ex)
+                {
+                    RunOnUiThread(() => _browser?.SetBusy("加载失败：" + ex.Message));
+                }
+                finally
+                {
+                    _browsing = false;
+                }
+            });
+        }
 
         private void RunOnBackground(Action work)
         {

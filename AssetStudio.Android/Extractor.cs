@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using AssetStudio;
+using Object = AssetStudio.Object;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.PixelFormats;
@@ -255,6 +256,8 @@ namespace AssetStudioMobile
             _loadedObjects = 0;
 
             var batches = new List<(int Start, int Count)>(Batches(_candidates));
+            _batches = batches;
+            BatchCount = batches.Count;
             if (batches.Count <= 1)
             {
                 // Small enough to hold, so hold it: Export then works straight out of memory
@@ -293,6 +296,36 @@ namespace AssetStudioMobile
         }
 
         private string _lastParent;
+
+        /// <summary>The batch split the scan produced, kept so browsing can walk it.</summary>
+        private List<(int Start, int Count)> _batches;
+
+        /// <summary>How many batches the last scan split the candidate files into.</summary>
+        public int BatchCount { get; private set; }
+
+        /// <summary>
+        /// Loads one batch and keeps its objects, for browsing.
+        ///
+        /// This deliberately holds them, which the export path does not: a phone cannot hold the
+        /// whole tree (that is why the export batches at all), so browsing is one batch at a time
+        /// and the caller walks them. Each call replaces the previous batch.
+        /// </summary>
+        public IReadOnlyList<Object> BrowseBatch(int index)
+        {
+            if (_candidates == null) throw new InvalidOperationException("Scan a folder first.");
+            if (_batches == null) _batches = new List<(int Start, int Count)>(Batches(_candidates));
+            if (index < 0 || index >= _batches.Count) return Array.Empty<Object>();
+
+            _assetsManager.Clear();
+            _released = false;
+
+            var (start, count) = _batches[index];
+            LoadBatch(start, count);
+
+            var objects = new List<Object>();
+            foreach (var file in _assetsManager.AssetsFileList) objects.AddRange(file.Objects);
+            return objects;
+        }
 
         /// <summary>
         /// Loads one range of the scan. This is the only place the loader is called, so it is the
