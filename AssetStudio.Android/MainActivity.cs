@@ -20,6 +20,7 @@ namespace AssetStudioMobile
     {
         private const int ReqPickTree = 1001;
         private const int ReqPickApk = 1002;
+        private const int ReqPickScript = 1003;
 
         /// <summary>The export screen. It owns its views; this class owns the behaviour.</summary>
         private ExportPanel _panel;
@@ -33,6 +34,9 @@ namespace AssetStudioMobile
         private bool _browsing;
 
         private Extractor _extractor;
+
+        /// <summary>Kept so a rescan keeps using the script the user picked.</summary>
+        private Scripting.LuaDecryptor _decryptor;
         private string _inputDir;
         private string _outputDir;
 
@@ -100,6 +104,8 @@ namespace AssetStudioMobile
             _panel.ExportRequested += () => RunOnBackground(() => Export(_panel.Kind.SelectedItemPosition, _panel.Overwrite.Checked));
             _panel.SelfTestRequested += () => RunOnBackground(() => SelfTest.AppendResults(Append));
             _panel.BrowseRequested += OpenBrowser;
+            _panel.PickScriptRequested += PickScript;
+            _panel.ClearScriptRequested += ClearScript;
 
             return Inset(_panel.Root);
         }
@@ -114,6 +120,12 @@ namespace AssetStudioMobile
             // (AssetStudioGUIForm.cs:2545) and the CLI as --avoid-typetree; this makes it
             // switchable from adb so the two can be measured on the same device.
             if (intent.HasExtra("typetree")) Extractor.UseTypeTree = intent.GetBooleanExtra("typetree", true);
+
+            // Optional: a Lua decryption script to run over the bytes before the loader reads them.
+            // The picker is the normal way in; this is so a run can be driven from adb, and so a
+            // script can be tried without going through the file chooser every time.
+            var scriptPath = intent.GetStringExtra("script");
+            if (!string.IsNullOrWhiteSpace(scriptPath)) LoadScriptFromPath(scriptPath);
 
             switch (action.ToLowerInvariant())
             {
@@ -357,6 +369,85 @@ namespace AssetStudioMobile
             Append("ASTC dump armed, writing to " + dir);
         }
 
+        private void PickScript()
+        {
+            var intent = new Intent(Intent.ActionOpenDocument);
+            // A .lua file has no reliable MIME type, so this cannot filter by one.
+            intent.SetType("*/*");
+            intent.AddCategory(Intent.CategoryOpenable);
+            intent.AddFlags(ActivityFlags.GrantReadUriPermission);
+            try
+            {
+                StartActivityForResult(Intent.CreateChooser(intent, "选择 Lua 解密脚本"), ReqPickScript);
+            }
+            catch (Exception ex)
+            {
+                Append($"ERROR: 没有可用的文件选择器（{ex.Message}）");
+            }
+        }
+
+        /// <summary>
+        /// Copies the picked script somewhere readable and compiles it, so a script that does not
+        /// load is reported now rather than in the middle of a scan.
+        /// </summary>
+        private void ImportScript(Android.Net.Uri uri)
+        {
+            try
+            {
+                var name = ImportUtils.LeafNameOf(uri);
+                if (string.IsNullOrEmpty(name)) name = "script.lua";
+
+                var dir = Path.Combine(FilesRoot(), "scripts");
+                Directory.CreateDirectory(dir);
+                var path = Path.Combine(dir, name);
+
+                using (var input = ContentResolver.OpenInputStream(uri))
+                using (var output = File.Create(path))
+                {
+                    input.CopyTo(output);
+                }
+
+                LoadScriptFromPath(path);
+            }
+            catch (Exception ex)
+            {
+                Append($"lua: 读取脚本失败：{ex.Message}");
+            }
+        }
+
+        private void LoadScriptFromPath(string path)
+        {
+            var decryptor = Scripting.LuaDecryptor.Load(path, out var error);
+            if (decryptor == null)
+            {
+                _decryptor = null;
+                _panel.ScriptName = null;
+                Append($"lua: {Path.GetFileName(path)} 加载失败：{error}");
+                return;
+            }
+
+            _decryptor = decryptor;
+            _panel.ScriptName = Path.GetFileName(path);
+            if (_extractor != null) ApplyDecryptor(_extractor);
+            Append($"lua: 已加载 {Path.GetFileName(path)}");
+        }
+
+        private void ClearScript()
+        {
+            _decryptor = null;
+            _panel.ScriptName = null;
+            if (_extractor != null) ApplyDecryptor(_extractor);
+            Append("lua: 已清除解密脚本");
+        }
+
+        private void ApplyDecryptor(Extractor extractor)
+        {
+            extractor.Decryptor = _decryptor;
+            extractor.DecryptStagingRoot = Path.Combine(FilesRoot(), "decrypted");
+        }
+
+        private string FilesRoot() => GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
+
         private void PickApkFile()
         {
             var intent = new Intent(Intent.ActionOpenDocument);
@@ -456,6 +547,12 @@ namespace AssetStudioMobile
             base.OnActivityResult(requestCode, resultCode, data);
             if (resultCode != Result.Ok || data?.Data == null) return;
 
+            if (requestCode == ReqPickScript)
+            {
+                ImportScript(data.Data);
+                return;
+            }
+
             if (requestCode == ReqPickApk)
             {
                 ImportPickedApk(data.Data);
@@ -547,6 +644,7 @@ namespace AssetStudioMobile
             };
 
             // The kind decides which object types are worth building; see Extractor.FilterFor.
+            ApplyDecryptor(_extractor);
             _extractor.Load(_inputDir, (ExportKind)_panel.Kind.SelectedItemPosition);
 
             // A tree too big to hold is not read until Export asks for it, so there are no object

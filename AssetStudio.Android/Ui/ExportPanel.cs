@@ -41,6 +41,14 @@ namespace AssetStudioMobile.Ui
         public CheckBox Overwrite { get; }
         public TextView PermissionStatus { get; }
 
+        private readonly TextView _scriptLabel;
+
+        /// <summary>Which Lua decryption script is loaded, or that none is.</summary>
+        public string ScriptName
+        {
+            set => _scriptLabel.Text = string.IsNullOrEmpty(value) ? "未加载解密脚本" : value;
+        }
+
         /// <summary>
         /// The permission buttons are hidden once they are satisfied. Exposed as visibility rather
         /// than as the buttons themselves so the owner does not reach into the panel's views.
@@ -65,6 +73,8 @@ namespace AssetStudioMobile.Ui
         public event Action ExportRequested;
         public event Action SelfTestRequested;
         public event Action BrowseRequested;
+        public event Action PickScriptRequested;
+        public event Action ClearScriptRequested;
 
         public ExportPanel(Activity activity)
         {
@@ -114,6 +124,20 @@ namespace AssetStudioMobile.Ui
             var browse = new Button(activity) { Text = "浏览 / 预览" };
             browse.Click += (_, _) => BrowseRequested?.Invoke();
             root.AddView(browse);
+
+            // Encrypted bundles are a per-game scheme, so the tool takes the scheme as a script
+            // rather than pretending to know it.
+            var scriptRow = new LinearLayout(activity) { Orientation = Orientation.Horizontal };
+            var pickScript = new Button(activity) { Text = "解密脚本" };
+            pickScript.Click += (_, _) => PickScriptRequested?.Invoke();
+            scriptRow.AddView(pickScript);
+            var clearScript = new Button(activity) { Text = "清除" };
+            clearScript.Click += (_, _) => ClearScriptRequested?.Invoke();
+            scriptRow.AddView(clearScript);
+            root.AddView(scriptRow);
+
+            _scriptLabel = new TextView(activity) { TextSize = 11f, Text = "未加载解密脚本" };
+            root.AddView(_scriptLabel);
 
             root.AddView(new TextView(activity) { Text = "Export to" });
             OutputPath = new EditText(activity) { TextSize = 12f };
