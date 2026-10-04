@@ -99,6 +99,7 @@ namespace AssetStudioMobile.Ui
         private readonly List<Row> _items = new List<Row>();
         private readonly Button _filterButton;
         private readonly Button _exportFiltered;
+        private readonly ProgressBar _progress;
         private readonly EditText _search;
         private int _batch;
         private int _token;
@@ -164,12 +165,19 @@ namespace AssetStudioMobile.Ui
                 IndexedRequested?.Invoke(row.Entry);
             };
 
+            _progress = new ProgressBar(context, null, Android.Resource.Attribute.ProgressBarStyleHorizontal, 0)
+            {
+                Max = 100,
+                Visibility = ViewStates.Gone,
+            };
+
             _page = new LinearLayout(context) { Orientation = Android.Widget.Orientation.Vertical };
             _page.AddView(UiKit.Fill(_list));
 
             Root = UiKit.Column(context,
                 UiKit.Field(context, "浏览 · 一批一次加载，避免整棵资源树占用内存", _title),
                 UiKit.Row(context, close, exportAll, _exportFiltered),
+                _progress,
                 UiKit.Row(context, _previous, _next, _filterButton),
                 _search,
                 UiKit.Fill(_page));
@@ -354,6 +362,33 @@ namespace AssetStudioMobile.Ui
         }
 
 
+
+        /// <summary>
+        /// Export progress, shown while an export started from here is running. It used to be on the
+        /// export screen, which is no longer where exports are started from -- so it was invisible
+        /// exactly when it was needed.
+        /// </summary>
+        public void SetProgress(int current, int total)
+        {
+            _ui(() =>
+            {
+                _progress.Visibility = ViewStates.Visible;
+                _progress.Max = total <= 0 ? 100 : total;
+                _progress.Progress = current;
+
+                // The bar says "still going"; the number says how much. Progress here is counted in
+                // files rather than assets, because an asset count is only known once the whole tree
+                // has been read -- which is the thing being waited for.
+                var percent = total <= 0 ? 0 : (int)(100L * current / total);
+                _title.Text = $"导出中 {current}/{total} 个文件 ({percent}%)";
+            });
+        }
+
+        public void ClearProgress() => _ui(() =>
+        {
+            _progress.Visibility = ViewStates.Gone;
+            ApplySelection();   // puts the batch or index summary back in the title
+        });
 
         /// <summary>A one-line message where the batch summary normally sits.</summary>
         public void SetStatus(string message) => _ui(() => _title.Text = message);

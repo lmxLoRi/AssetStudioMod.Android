@@ -116,7 +116,7 @@ namespace AssetStudioMobile
             _panel.PickApkRequested += PickApkFile;
             _panel.ImportFromAppRequested += ChooseInstalledApp;
             _panel.ScanRequested += () => RunOnBackground(Scan);
-            _panel.ExportRequested += () => RunOnBackground(() => Export(_panel.Overwrite.Checked));
+
             _panel.SelfTestRequested += () => RunOnBackground(() => SelfTest.AppendResults(Append));
             _panel.BrowseRequested += OpenBrowser;
             _panel.PickScriptRequested += PickScript;
@@ -239,7 +239,9 @@ namespace AssetStudioMobile
                         }
                     }
 
-                    if (intent.GetBooleanExtra("overwrite", false)) _panel.Overwrite.Checked = true;
+                    // `-e overwrite` is accepted and ignored: every export goes to a new timestamped
+                    // directory, so there has never been anything to overwrite in practice.
+                    _ = intent.GetBooleanExtra("overwrite", false);
 
                     RunOnBackground(() =>
                     {
@@ -254,7 +256,7 @@ namespace AssetStudioMobile
                         // Each `am start` is a fresh process, so an export launched this way has
                         // no loaded assets unless we scan first.
                         if (_extractor == null) Scan();
-                        Export(_panel.Overwrite.Checked);
+                        Export(true);
                     });
                     break;
                 }
@@ -713,6 +715,7 @@ namespace AssetStudioMobile
             var report = _extractor.Export(dest, options);
             Append(report.ToString());
             foreach (var e in report.Errors.Take(20)) Append("  " + e);
+            RunOnUiThread(() => _browser?.ClearProgress());
             SetStatus($"Exported {report.Exported}/{report.Matched} -> {Path.GetFileName(dest)}");
         }
 
@@ -728,6 +731,7 @@ namespace AssetStudioMobile
             var report = _extractor.ExportIndexed(entries, dest, options);
             Append(report.ToString());
             foreach (var e in report.Errors.Take(20)) Append("  " + e);
+            RunOnUiThread(() => _browser?.ClearProgress());
             SetStatus($"Exported {report.Exported}/{report.Matched} -> {Path.GetFileName(dest)}");
         }
 
@@ -777,9 +781,9 @@ namespace AssetStudioMobile
             _browser.ExportRequested += target => RunOnBackground(() => ExportSingle(target));
             _browser.IndexRequested += kinds => RunOnBackground(() => BuildIndex(kinds));
             _browser.IndexedRequested += entry => RunOnBackground(() => ShowIndexed(entry));
-            _browser.ExportAllRequested += () => RunOnBackground(() => Export(_panel.Overwrite.Checked));
+            _browser.ExportAllRequested += () => RunOnBackground(() => Export(true));
             _browser.ExportFilteredRequested += entries =>
-                RunOnBackground(() => ExportFiltered(entries, _panel.Overwrite.Checked));
+                RunOnBackground(() => ExportFiltered(entries, true));
             _browser.SelectionChanged += kinds =>
             {
                 _categories.Clear();
@@ -949,7 +953,13 @@ namespace AssetStudioMobile
 
         private void SetBusy(bool busy) => _panel?.SetBusy(busy);
 
-        private void Report(int cur, int total) => _panel?.Report(cur, total);
+        private void Report(int cur, int total)
+        {
+            // Both screens: a scan reports while the export screen is up, an export reports while the
+            // browser is, and only one of them is ever the one being looked at.
+            _panel?.Report(cur, total);
+            _browser?.SetProgress(cur, total);
+        }
 
         /// <summary>
         /// Status text must be set on the UI thread: every long operation runs on a background

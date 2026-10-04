@@ -25,10 +25,8 @@ namespace AssetStudioMobile.Ui
         private readonly List<string> _logLines = new List<string>();
         private readonly TextView _log;
         private readonly TextView _status;
-        private readonly ProgressBar _bar;
         private readonly Button _import;
         private readonly Button _scan;
-        private readonly Button _export;
         private readonly Button _shizuku;
         private readonly Button _grant;
 
@@ -37,7 +35,6 @@ namespace AssetStudioMobile.Ui
 
         public EditText InputPath { get; }
         public EditText OutputPath { get; }
-        public CheckBox Overwrite { get; }
         public TextView PermissionStatus { get; }
 
         private readonly TextView _scriptLabel;
@@ -69,7 +66,6 @@ namespace AssetStudioMobile.Ui
         public event Action PickApkRequested;
         public event Action ImportFromAppRequested;
         public event Action ScanRequested;
-        public event Action ExportRequested;
         public event Action SelfTestRequested;
         public event Action BrowseRequested;
         public event Action PickScriptRequested;
@@ -142,19 +138,9 @@ namespace AssetStudioMobile.Ui
             OutputPath = new EditText(activity) { TextSize = 12f };
             root.AddView(OutputPath);
 
-            Overwrite = new CheckBox(activity) { Text = "Overwrite existing" };
-            root.AddView(Overwrite);
-
-            _export = new Button(activity) { Text = "Export" };
-            _export.Click += (_, _) => ExportRequested?.Invoke();
-            root.AddView(_export);
-
             var selftest = new Button(activity) { Text = "Run codec self-test" };
             selftest.Click += (_, _) => SelfTestRequested?.Invoke();
             root.AddView(selftest);
-
-            _bar = new ProgressBar(activity, null, Android.Resource.Attribute.ProgressBarStyleHorizontal, 0) { Max = 100 };
-            root.AddView(_bar);
 
             _status = new TextView(activity);
             root.AddView(_status);
@@ -179,14 +165,15 @@ namespace AssetStudioMobile.Ui
         /// </summary>
         public void SetStatus(string text) => _activity.RunOnUiThread(() => _status.Text = text);
 
+        /// <summary>
+        /// Progress goes to the status line. The bar that used to be here moved with the export:
+        /// this screen had one nobody watched, because every export now runs from the browser.
+        /// </summary>
         public void Report(int current, int total)
         {
-            var percent = total <= 0 ? 0 : (int)(100L * current / total);
-            _activity.RunOnUiThread(() =>
-            {
-                _bar.Progress = percent;
-                if (total > 0) _status.Text = $"{current}/{total} ({percent}%)";
-            });
+            if (total <= 0) return;
+            var percent = (int)(100L * current / total);
+            _activity.RunOnUiThread(() => _status.Text = $"{current}/{total} ({percent}%)");
         }
 
         public void SetBusy(bool busy)
@@ -195,7 +182,6 @@ namespace AssetStudioMobile.Ui
             {
                 _import.Enabled = !busy;
                 _scan.Enabled = !busy;
-                _export.Enabled = !busy;
                 if (busy) _status.Text = "Working...";
             });
         }
