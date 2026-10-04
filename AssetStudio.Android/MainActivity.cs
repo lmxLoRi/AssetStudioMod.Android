@@ -21,9 +21,8 @@ namespace AssetStudioMobile
         private const int ReqPickTree = 1001;
         private const int ReqPickApk = 1002;
 
-        private TextView _status;
-        private TextView _log;
-        private ProgressBar _bar;
+        /// <summary>The export screen. It owns its views; this class owns the behaviour.</summary>
+        private ExportPanel _panel;
 
         /// <summary>Kept so the browser can hand the screen back when it closes.</summary>
         private View _mainRoot;
@@ -32,21 +31,7 @@ namespace AssetStudioMobile
 
         /// <summary>One batch load at a time: BrowseBatch reuses the extractor's manager.</summary>
         private bool _browsing;
-        private Button _btnImport;
-        private Button _btnGrant;
-        private Button _btnShizuku;
-        private TextView _permStatus;
-        private EditText _inputPath;
-        private EditText _outputPath;
-        private Button _btnScan;
-        private Button _btnExport;
-        private Spinner _kind;
-        private CheckBox _overwrite;
 
-        private const int LogHistoryLimit = 2000;
-        private const int LogVisibleLines = 14;
-
-        private readonly List<string> _logLines = new List<string>();
         private Extractor _extractor;
         private string _inputDir;
         private string _outputDir;
@@ -83,8 +68,8 @@ namespace AssetStudioMobile
 
             _mainRoot = BuildUi();
             SetContentView(_mainRoot);
-            _inputPath.Text = _inputDir;
-            _outputPath.Text = _outputDir;
+            _panel.InputPath.Text = _inputDir;
+            _panel.OutputPath.Text = _outputDir;
             RefreshPermissionUi();
             Append($"input : {_inputDir}");
             Append($"output: {_outputDir}");
@@ -103,119 +88,22 @@ namespace AssetStudioMobile
 
         private View BuildUi()
         {
-            var root = new LinearLayout(this) { Orientation = Orientation.Vertical };
+            _panel = new ExportPanel(this);
 
-            _btnShizuku = new Button(this) { Text = "Shizuku: request permission" };
-            _btnShizuku.Click += (_, __) => ShizukuBridge.RequestPermission();
-            root.AddView(_btnShizuku);
+            _panel.ShizukuRequested += () => ShizukuBridge.RequestPermission();
+            _panel.GrantRequested += RequestAllFilesAccess;
+            _panel.LoadRequested += LoadFromPathField;
+            _panel.PickFolderRequested += PickTree;
+            _panel.PickApkRequested += PickApkFile;
+            _panel.ImportFromAppRequested += ChooseInstalledApp;
+            _panel.ScanRequested += () => RunOnBackground(Scan);
+            _panel.ExportRequested += () => RunOnBackground(() => Export(_panel.Kind.SelectedItemPosition, _panel.Overwrite.Checked));
+            _panel.SelfTestRequested += () => RunOnBackground(() => SelfTest.AppendResults(Append));
+            _panel.BrowseRequested += OpenBrowser;
 
-            _btnGrant = new Button(this) { Text = "Grant all-files access" };
-            _btnGrant.Click += (_, __) => RequestAllFilesAccess();
-            root.AddView(_btnGrant);
-
-            _permStatus = new TextView(this) { TextSize = 11f };
-            root.AddView(_permStatus);
-
-            root.AddView(new TextView(this) { Text = "Bundle folder" });
-            var inputRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-            _inputPath = new EditText(this) { Hint = "/sdcard/Download/mygame", TextSize = 12f };
-            _inputPath.LayoutParameters = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f);
-            inputRow.AddView(_inputPath);
-            var loadBtn = new Button(this) { Text = "Load" };
-            loadBtn.Click += (_, __) => LoadFromPathField();
-            inputRow.AddView(loadBtn);
-            root.AddView(inputRow);
-
-            _btnImport = new Button(this) { Text = "Pick folder" };
-            _btnImport.Click += (_, __) => PickTree();
-            root.AddView(_btnImport);
-
-            // An APK is a ZIP, and the loader already handles ZIPs, so both of these end the same
-            // way as picking a folder: stage the bytes somewhere readable, then Scan.
-            var apkRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-            var pickApk = new Button(this) { Text = "Pick .apk" };
-            pickApk.Click += (_, __) => PickApkFile();
-            apkRow.AddView(pickApk);
-            var fromApp = new Button(this) { Text = "Import from app" };
-            fromApp.Click += (_, __) => ChooseInstalledApp();
-            apkRow.AddView(fromApp);
-            root.AddView(apkRow);
-
-            _btnScan = new Button(this) { Text = "Rescan" };
-            _btnScan.Click += (_, __) => RunOnBackground(Scan);
-            root.AddView(_btnScan);
-
-            var browse = new Button(this) { Text = "浏览 / 预览" };
-            browse.Click += (_, __) => OpenBrowser();
-            root.AddView(browse);
-
-            root.AddView(new TextView(this) { Text = "Export to" });
-            _outputPath = new EditText(this) { TextSize = 12f };
-            root.AddView(_outputPath);
-
-            _kind = new Spinner(this);
-
-            // Built from the enum rather than the export_kinds string array. The two drifted apart
-            // when TextureRaw was added: the array still had 7 entries, the intent selected index 7,
-            // and the Spinner's ArrayAdapter.getItem threw ArrayIndexOutOfBoundsException while
-            // laying out -- a crash on the UI thread, not a mislabelled row.
-            _kind.Adapter = new ArrayAdapter<string>(this, Android.Resource.Layout.SimpleSpinnerDropDownItem,
-                                                     Enum.GetNames(typeof(ExportKind)));
-            root.AddView(new TextView(this) { Text = "Export kind" });
-            root.AddView(_kind);
-
-            _overwrite = new CheckBox(this) { Text = "Overwrite existing" };
-            root.AddView(_overwrite);
-
-            _btnExport = new Button(this) { Text = "Export" };
-            _btnExport.Click += (_, __) => RunOnBackground(() => Export(_kind.SelectedItemPosition, _overwrite.Checked));
-            root.AddView(_btnExport);
-
-            var selftest = new Button(this) { Text = "Run codec self-test" };
-            selftest.Click += (_, __) => RunOnBackground(() => SelfTest.AppendResults(Append));
-            root.AddView(selftest);
-
-            _bar = new ProgressBar(this, null, Android.Resource.Attribute.ProgressBarStyleHorizontal, 0) { Max = 100 };
-            root.AddView(_bar);
-
-            _status = new TextView(this);
-            root.AddView(_status);
-
-            _log = new TextView(this) { TextSize = 10f };
-            root.AddView(_log);
-
-            // Everything lives in ONE ScrollView. A nested ScrollView for the log plus
-            // FullScroll() auto-scrolling is what pushed the top buttons off-screen:
-            // ScrollView.FullScroll delegates to the parent first, so scrolling the log to the
-            // bottom scrolled the whole page and hid "Import" and "Scan". The log is instead
-            // capped at the most recent lines (see Append), which keeps the page short enough
-            // that the buttons stay visible without scrolling.
-            var outer = new ScrollView(this) { FillViewport = true };
-            outer.AddView(root);
-
-            // targetSdk >= 35 on Android 15/16 is edge-to-edge by default, so the content view is
-            // laid out behind the status bar and toolbar unless the insets are applied. Without
-            // this the first row of buttons sits underneath the title bar.
-            var basePad = (int)(16 * Resources.DisplayMetrics.Density);
-            root.SetPadding(basePad, basePad, basePad, basePad);
-
-            if (Build.VERSION.SdkInt >= BuildVersionCodes.R)
-            {
-                outer.SetOnApplyWindowInsetsListener(new InsetListener(root, basePad));
-            }
-
-            return outer;
+            return Inset(_panel.Root);
         }
 
-        /// <summary>
-        /// Allows driving the app from `adb shell am start` without tapping, e.g. for automated
-        /// smoke tests:
-        ///
-        ///   adb shell am start -n com.aelurum.assetstudiomod/crc6457c8bc28ddf7d589.MainActivity \
-        ///       -e action selftest
-        ///   adb shell am start -n ... -e action scan
-        ///   adb shell am start -n ... -e action export --es kind Texture2D
-        /// </summary>
         private void RunIntentAction(Intent intent)
         {
             var action = intent?.GetStringExtra("action");
@@ -265,7 +153,7 @@ namespace AssetStudioMobile
                     var p = intent.GetStringExtra("path");
                     if (!string.IsNullOrWhiteSpace(p))
                     {
-                        _inputPath.Text = p;
+                        _panel.InputPath.Text = p;
                         LoadFromPathField();
                     }
                     else
@@ -287,7 +175,7 @@ namespace AssetStudioMobile
                             var readable = ResolveReadable(browsePath);
                             if (readable == null) return;
                             _inputDir = readable;
-                            RunOnUiThread(() => _inputPath.Text = readable);
+                            RunOnUiThread(() => _panel.InputPath.Text = readable);
                         }
 
                         Scan();
@@ -308,13 +196,13 @@ namespace AssetStudioMobile
                     {
                         idx = Math.Max(0, Array.IndexOf(Enum.GetNames(typeof(ExportKind)), kindName));
                     }
-                    if (intent.GetBooleanExtra("overwrite", false)) _overwrite.Checked = true;
+                    if (intent.GetBooleanExtra("overwrite", false)) _panel.Overwrite.Checked = true;
 
                     // Scan() reads the kind off the spinner to decide which object types to build,
                     // so the spinner has to agree with what was asked for here. Clamped: an index
                     // past the end of the adapter is a crash, and an unknown kind name used to
                     // produce exactly that.
-                    _kind.SetSelection(Math.Min(idx, _kind.Adapter.Count - 1));
+                    _panel.Kind.SetSelection(Math.Min(idx, _panel.Kind.Adapter.Count - 1));
 
                     RunOnBackground(() =>
                     {
@@ -323,13 +211,13 @@ namespace AssetStudioMobile
                             var readable = ResolveReadable(exportPath);
                             if (readable == null) return;
                             _inputDir = readable;
-                            RunOnUiThread(() => _inputPath.Text = readable);
+                            RunOnUiThread(() => _panel.InputPath.Text = readable);
                         }
 
                         // Each `am start` is a fresh process, so an export launched this way has
                         // no loaded assets unless we scan first.
                         if (_extractor == null) Scan();
-                        Export(idx, _overwrite.Checked);
+                        Export(idx, _panel.Overwrite.Checked);
                     });
                     break;
                 }
@@ -344,13 +232,13 @@ namespace AssetStudioMobile
 
         private void RefreshPermissionUi()
         {
-            if (_permStatus == null || _btnGrant == null) return;
+            if (_panel?.PermissionStatus == null) return;
             var granted = StorageAccess.HasAllFilesAccess();
-            _btnGrant.Visibility = granted ? ViewStates.Gone : ViewStates.Visible;
+            _panel.GrantVisibility = granted ? ViewStates.Gone : ViewStates.Visible;
 
             var shizuku = ShizukuBridge.State;
-            _btnShizuku.Visibility = shizuku == ShizukuState.Ready ? ViewStates.Gone : ViewStates.Visible;
-            _permStatus.Text = (granted
+            _panel.ShizukuVisibility = shizuku == ShizukuState.Ready ? ViewStates.Gone : ViewStates.Visible;
+            _panel.PermissionStatus.Text = (granted
                     ? "all-files access: GRANTED (read/write any path)"
                     : "all-files access: not granted. SAF still works but copies files.") +
                 "\n" + ShizukuBridge.Describe() +
@@ -374,7 +262,7 @@ namespace AssetStudioMobile
         /// <summary>Loads the directory typed into the path field, then scans it (feature 4).</summary>
         private void LoadFromPathField()
         {
-            var typed = _inputPath.Text;
+            var typed = _panel.InputPath.Text;
             if (string.IsNullOrWhiteSpace(typed))
             {
                 Append("ERROR: no path given");
@@ -386,7 +274,7 @@ namespace AssetStudioMobile
                 var readable = ResolveReadable(typed);
                 if (readable == null) return;
                 _inputDir = readable;
-                RunOnUiThread(() => _inputPath.Text = readable);
+                RunOnUiThread(() => _panel.InputPath.Text = readable);
                 Scan();
             });
         }
@@ -527,7 +415,7 @@ namespace AssetStudioMobile
                     return;
                 }
                 _inputDir = dir;
-                RunOnUiThread(() => _inputPath.Text = dir);
+                RunOnUiThread(() => _panel.InputPath.Text = dir);
                 Scan();
             });
         }
@@ -544,7 +432,7 @@ namespace AssetStudioMobile
                     return;
                 }
                 _inputDir = dir;
-                RunOnUiThread(() => _inputPath.Text = dir);
+                RunOnUiThread(() => _panel.InputPath.Text = dir);
                 Scan();
             });
         }
@@ -588,7 +476,7 @@ namespace AssetStudioMobile
             {
                 Append($"Using {direct} directly (no copy)");
                 _inputDir = direct;
-                _inputPath.Text = direct;
+                _panel.InputPath.Text = direct;
                 RunOnBackground(Scan); // feature 4: no separate scan step
                 return;
             }
@@ -620,7 +508,7 @@ namespace AssetStudioMobile
                 if (readable != null)
                 {
                     _inputDir = readable;
-                    RunOnUiThread(() => _inputPath.Text = readable);
+                    RunOnUiThread(() => _panel.InputPath.Text = readable);
                     Scan(); // feature 4: load straight after the directory is chosen
                     return;
                 }
@@ -630,7 +518,7 @@ namespace AssetStudioMobile
             Append($"Importing {uri} ...");
             var copied = ImportUtils.CopyTree(this, uri, _inputDir, Append, (c, t) => Report(c, t));
             Append($"Imported {copied} file(s) into {_inputDir}");
-            RunOnUiThread(() => _inputPath.Text = _inputDir);
+            RunOnUiThread(() => _panel.InputPath.Text = _inputDir);
             Scan(); // feature 4: load straight after the directory is chosen
         }
 
@@ -659,7 +547,7 @@ namespace AssetStudioMobile
             };
 
             // The kind decides which object types are worth building; see Extractor.FilterFor.
-            _extractor.Load(_inputDir, (ExportKind)_kind.SelectedItemPosition);
+            _extractor.Load(_inputDir, (ExportKind)_panel.Kind.SelectedItemPosition);
 
             // A tree too big to hold is not read until Export asks for it, so there are no object
             // counts to show yet, only what the scan recognised.
@@ -695,9 +583,9 @@ namespace AssetStudioMobile
                 Overwrite = overwrite,
             };
 
-            var baseDir = string.IsNullOrWhiteSpace(_outputPath?.Text)
+            var baseDir = string.IsNullOrWhiteSpace(_panel.OutputPath?.Text)
                 ? _outputDir
-                : _outputPath.Text.Trim();
+                : _panel.OutputPath.Text.Trim();
             var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
             var dest = Path.Combine(baseDir, $"{options.Kind}_{stamp}");
             Append($"Exporting {options.Kind} -> {dest}");
@@ -808,47 +696,17 @@ namespace AssetStudioMobile
             { IsBackground = true, Name = "assetstudio", Priority = System.Threading.ThreadPriority.BelowNormal }.Start();
         }
 
-        private void SetBusy(bool busy)
-        {
-            RunOnUiThread(() =>
-            {
-                _btnImport.Enabled = !busy;
-                _btnScan.Enabled = !busy;
-                _btnExport.Enabled = !busy;
-                if (busy) SetStatus("Working...");
-            });
-        }
+        private void SetBusy(bool busy) => _panel?.SetBusy(busy);
 
-        private void Report(int cur, int total)
-        {
-            var pct = total <= 0 ? 0 : (int)(100L * cur / total);
-            RunOnUiThread(() =>
-            {
-                _bar.Progress = pct;
-                if (total > 0) SetStatus($"{cur}/{total} ({pct}%)");
-            });
-        }
+        private void Report(int cur, int total) => _panel?.Report(cur, total);
 
         /// <summary>
         /// Status text must be set on the UI thread: every long operation runs on a background
         /// thread, and touching a View from there throws CalledFromWrongThreadException.
         /// </summary>
-        private void SetStatus(string text) => RunOnUiThread(() => _status.Text = text);
+        private void SetStatus(string text) => _panel?.SetStatus(text);
 
-        private void Append(string line)
-        {
-            lock (_logLines)
-            {
-                _logLines.Add($"{DateTime.Now:HH:mm:ss} {line}");
-                if (_logLines.Count > LogHistoryLimit) _logLines.RemoveRange(0, _logLines.Count - LogHistoryLimit);
-
-                // Only the tail is shown. Auto-scrolling instead would scroll the page (see
-                // BuildUi) and hide the buttons.
-                var start = Math.Max(0, _logLines.Count - LogVisibleLines);
-                var text = start > 0 ? "...\n" + string.Join("\n", _logLines.GetRange(start, _logLines.Count - start)) : string.Join("\n", _logLines);
-                RunOnUiThread(() => _log.Text = text);
-            }
-        }
+        private void Append(string line) => _panel?.Append(line);
 
         protected override void OnDestroy()
         {
