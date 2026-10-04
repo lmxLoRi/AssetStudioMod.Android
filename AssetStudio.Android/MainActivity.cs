@@ -19,7 +19,7 @@ namespace AssetStudioMobile
     public class MainActivity : Activity
     {
         private const int ReqPickTree = 1001;
-        private const int ReqPickApk = 1002;
+        private const int ReqPickFile = 1002;
         private const int ReqPickScript = 1003;
 
         /// <summary>The export screen. It owns its views; this class owns the behaviour.</summary>
@@ -90,9 +90,9 @@ namespace AssetStudioMobile
             _panel.InputPath.Text = _inputDir;
             _panel.OutputPath.Text = _outputDir;
             RefreshPermissionUi();
-            Append($"input : {_inputDir}");
-            Append($"output: {_outputDir}");
-            Append("Import a folder of Unity bundles, then Scan, then Export.");
+            Append($"输入：{_inputDir}");
+            Append($"输出：{_outputDir}");
+            Append("先选资源文件夹（或导入应用 / 选择文件），再「重新扫描」。");
 
             // `-e dumpastc 1` captures real compressed ASTC payloads so the decoders can be
             // benchmarked on the data a game actually contains instead of on a test image. This has
@@ -113,7 +113,7 @@ namespace AssetStudioMobile
             _panel.GrantRequested += RequestAllFilesAccess;
             _panel.LoadRequested += LoadFromPathField;
             _panel.PickFolderRequested += PickTree;
-            _panel.PickApkRequested += PickApkFile;
+            _panel.PickApkRequested += PickResourceFile;
             _panel.ImportFromAppRequested += ChooseInstalledApp;
             _panel.ScanRequested += () => RunOnBackground(Scan);
 
@@ -158,7 +158,7 @@ namespace AssetStudioMobile
                     var package = intent.GetStringExtra("package");
                     if (string.IsNullOrWhiteSpace(package))
                     {
-                        Append("ERROR: -e package is required for action=apk");
+                        Append("错误：action=apk 需要 -e package");
                         break;
                     }
                     RunOnBackground(() =>
@@ -167,7 +167,7 @@ namespace AssetStudioMobile
                         var app = apps.Find(a => a.PackageName == package);
                         if (app == null)
                         {
-                            Append($"ERROR: {package} is not in the visible package list");
+                            Append($"错误：{package} 不在可见的软件列表里");
                             return;
                         }
                         ImportInstalledApp(app);
@@ -186,7 +186,7 @@ namespace AssetStudioMobile
                     }
                     else
                     {
-                        Append("ERROR: -e path is required for action=load");
+                        Append("错误：action=load 需要 -e path");
                     }
                     break;
                 }
@@ -279,11 +279,11 @@ namespace AssetStudioMobile
             var shizuku = ShizukuBridge.State;
             _panel.ShizukuVisibility = shizuku == ShizukuState.Ready ? ViewStates.Gone : ViewStates.Visible;
             _panel.PermissionStatus.Text = (granted
-                    ? "all-files access: GRANTED (read/write any path)"
-                    : "all-files access: not granted. SAF still works but copies files.") +
+                    ? "所有文件访问权限：已授予（可读写任意路径）"
+                    : "所有文件访问权限：未授予。仍可用 SAF，但会把文件复制一份。") +
                 "\n" + ShizukuBridge.Describe() +
                 (shizuku == ShizukuState.Ready
-                    ? "\nneeded for /sdcard/Android/data"
+                    ? "\n访问 /sdcard/Android/data 时需要它"
                     : "");
         }
 
@@ -295,7 +295,7 @@ namespace AssetStudioMobile
             }
             catch (Exception ex)
             {
-                Append($"ERROR: cannot open all-files settings ({ex.Message})");
+                Append($"错误：打不开「所有文件访问」设置（{ex.Message}）");
             }
         }
 
@@ -305,7 +305,7 @@ namespace AssetStudioMobile
             var typed = _panel.InputPath.Text;
             if (string.IsNullOrWhiteSpace(typed))
             {
-                Append("ERROR: no path given");
+                Append("错误：没有填路径");
                 return;
             }
 
@@ -334,7 +334,7 @@ namespace AssetStudioMobile
             var full = path?.Trim() ?? "";
             if (full.Length == 0)
             {
-                Append("ERROR: no path given");
+                Append("错误：没有填路径");
                 return null;
             }
             try { full = Path.GetFullPath(full); } catch { /* keep the raw text for the error */ }
@@ -343,13 +343,13 @@ namespace AssetStudioMobile
             if (problem == null) return full;
 
             Append($"{full}: {problem}");
-            Append("all-files access does not cover /sdcard/Android/data; trying Shizuku...");
+            Append("「所有文件访问」覆盖不到 /sdcard/Android/data，改用 Shizuku…");
 
             if (ShizukuBridge.State != ShizukuState.Ready)
             {
-                Append($"ERROR: cannot read it, and Shizuku is not usable ({ShizukuBridge.State}). " +
-                       "Copy the game's files to /sdcard/Download first.");
-                SetStatus("cannot read, and Shizuku unavailable");
+                Append($"错误：读不到它，而且 Shizuku 不可用（{ShizukuBridge.State}）。" +
+                       "先把游戏文件复制到 /sdcard/Download。");
+                SetStatus("读不到，且 Shizuku 不可用");
                 return null;
             }
 
@@ -391,10 +391,10 @@ namespace AssetStudioMobile
                 }
                 catch (Exception ex)
                 {
-                    Append($"astc dump failed: {ex.Message}");
+                    Append($"ASTC 导出失败：{ex.Message}");
                 }
             };
-            Append("ASTC dump armed, writing to " + dir);
+            Append("ASTC 采样已武装，写入 " + dir);
         }
 
         private void PickScript()
@@ -439,7 +439,7 @@ namespace AssetStudioMobile
             }
             catch (Exception ex)
             {
-                Append($"lua: 读取脚本失败：{ex.Message}");
+                Append($"读取解密脚本失败：{ex.Message}");
             }
         }
 
@@ -450,7 +450,7 @@ namespace AssetStudioMobile
             {
                 _decryptor = null;
                 _panel.ScriptName = null;
-                Append($"lua: {Path.GetFileName(path)} 加载失败：{error}");
+                Append($"解密脚本 {Path.GetFileName(path)} 加载失败：{error}");
                 return;
             }
 
@@ -476,19 +476,22 @@ namespace AssetStudioMobile
 
         private string FilesRoot() => GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
 
-        private void PickApkFile()
+        private void PickResourceFile()
         {
             var intent = new Intent(Intent.ActionOpenDocument);
-            intent.SetType("application/vnd.android.package-archive");
+
+            // Anything, not just an APK: a bundle, a .assets file, a zip. An APK is only one place
+            // resources live, and the loader identifies files by their contents anyway.
+            intent.SetType("*/*");
             intent.AddCategory(Intent.CategoryOpenable);
             intent.AddFlags(ActivityFlags.GrantReadUriPermission);
             try
             {
-                StartActivityForResult(Intent.CreateChooser(intent, "Select an APK"), ReqPickApk);
+                StartActivityForResult(Intent.CreateChooser(intent, "选择资源文件"), ReqPickFile);
             }
             catch (Exception ex)
             {
-                Append($"ERROR: no document picker ({ex.Message})");
+                Append($"错误：没有可用的文件选择器（{ex.Message}）");
             }
         }
 
@@ -511,7 +514,7 @@ namespace AssetStudioMobile
                 RunOnUiThread(() =>
                 {
                     new AlertDialog.Builder(this)
-                        .SetTitle("Export from an installed app")
+                        .SetTitle("从已安装应用导出")
                         .SetItems(labels, (_, e) =>
                         {
                             if (e.Which >= 0 && e.Which < apps.Count) ImportInstalledApp(apps[e.Which]);
@@ -539,12 +542,12 @@ namespace AssetStudioMobile
             });
         }
 
-        private void ImportPickedApk(Android.Net.Uri uri)
+        private void ImportPickedFile(Android.Net.Uri uri)
         {
             RunOnBackground(() =>
             {
                 var external = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
-                var dir = ApkImport.StagePickedApk(this, uri, external, Append);
+                var dir = ApkImport.StagePickedFile(this, uri, external, Append);
                 if (dir == null)
                 {
                     SetStatus("cannot read the picked APK");
@@ -562,11 +565,11 @@ namespace AssetStudioMobile
             intent.AddFlags(ActivityFlags.GrantReadUriPermission | ActivityFlags.GrantPersistableUriPermission);
             try
             {
-                StartActivityForResult(Intent.CreateChooser(intent, "Select bundle folder"), ReqPickTree);
+                StartActivityForResult(Intent.CreateChooser(intent, "选择资源文件夹"), ReqPickTree);
             }
             catch (Exception ex)
             {
-                Append($"ERROR: no document picker ({ex.Message})");
+                Append($"错误：没有可用的文件选择器（{ex.Message}）");
             }
         }
 
@@ -581,9 +584,9 @@ namespace AssetStudioMobile
                 return;
             }
 
-            if (requestCode == ReqPickApk)
+            if (requestCode == ReqPickFile)
             {
-                ImportPickedApk(data.Data);
+                ImportPickedFile(data.Data);
                 return;
             }
 
@@ -599,7 +602,7 @@ namespace AssetStudioMobile
             var direct = StorageAccess.TryResolveTreePath(this, uri);
             if (direct != null)
             {
-                Append($"Using {direct} directly (no copy)");
+                Append($"直接使用 {direct}（不复制）");
                 _inputDir = direct;
                 _panel.InputPath.Text = direct;
                 RunOnBackground(Scan); // feature 4: no separate scan step
@@ -640,9 +643,9 @@ namespace AssetStudioMobile
                 Append("that path is not usable, so copying through the document provider instead");
             }
 
-            Append($"Importing {uri} ...");
+            Append($"正在导入 {uri} …");
             var copied = ImportUtils.CopyTree(this, uri, _inputDir, Append, (c, t) => Report(c, t));
-            Append($"Imported {copied} file(s) into {_inputDir}");
+            Append($"已导入 {copied} 个文件到 {_inputDir}");
             RunOnUiThread(() => _panel.InputPath.Text = _inputDir);
             Scan(); // feature 4: load straight after the directory is chosen
         }
@@ -656,8 +659,8 @@ namespace AssetStudioMobile
                 : 0;
             if (files == 0)
             {
-                SetStatus("No input files in the input folder");
-                Append("No input files. Pick a folder, or set a path and press Load.");
+                SetStatus("输入文件夹里没有文件");
+                Append("没有输入文件。选一个文件夹，或填好路径后按「加载」。");
                 return;
             }
 
@@ -678,7 +681,7 @@ namespace AssetStudioMobile
             // A tree too big to hold is not read until Export asks for it, so there are no object
             // counts to show yet, only what the scan recognised.
             SetStatus(_extractor.CandidateCount == 0
-                ? "No Unity files found"
+                ? "没有找到 Unity 资源文件"
                 : _extractor.LoadedObjects > 0
                     ? $"{_extractor.LoadedFiles} file(s), {_extractor.LoadedObjects} object(s) loaded"
                     : $"{_extractor.CandidateCount} candidate file(s) -- will be read on export");
@@ -688,8 +691,8 @@ namespace AssetStudioMobile
         {
             if (_extractor == null)
             {
-                SetStatus("Scan first");
-                Append("Nothing loaded yet. Pick a folder or set a path and press Load.");
+                SetStatus("请先「重新扫描」");
+                Append("还没有加载内容。先选文件夹或填好路径后按「加载」。");
                 return;
             }
 
@@ -698,7 +701,7 @@ namespace AssetStudioMobile
             // widened once set.
             if (!SameCategories(_extractor.LoadedCategories, _categories))
             {
-                Append($"categories changed to {SelectionTag()}, reloading");
+                Append($"类别改为 {SelectionTag()}，重新加载");
                 Scan();
                 if (_extractor == null) return;
             }
@@ -711,13 +714,13 @@ namespace AssetStudioMobile
             };
 
             var dest = OutputDirectory();
-            Append($"Exporting {SelectionTag()} -> {dest}");
+            Append($"正在导出 {SelectionTag()} → {dest}");
 
             var report = _extractor.Export(dest, options);
             Append(report.ToString());
             foreach (var e in report.Errors.Take(20)) Append("  " + e);
             RunOnUiThread(() => _browser?.ClearProgress());
-            SetStatus($"Exported {report.Exported}/{report.Matched} -> {Path.GetFileName(dest)}");
+            SetStatus($"已导出 {report.Exported}/{report.Matched} → {Path.GetFileName(dest)}");
         }
 
         /// <summary>Writes the objects the browser's index selected, loading each file once.</summary>
@@ -728,12 +731,12 @@ namespace AssetStudioMobile
             var options = new ExportOptions { Mode = _mode, Overwrite = overwrite };
             var dest = OutputDirectory();
 
-            Append($"Exporting {entries.Count} filtered object(s) -> {dest}");
+            Append($"正在导出筛选出的 {entries.Count} 个对象 → {dest}");
             var report = _extractor.ExportIndexed(entries, dest, options);
             Append(report.ToString());
             foreach (var e in report.Errors.Take(20)) Append("  " + e);
             RunOnUiThread(() => _browser?.ClearProgress());
-            SetStatus($"Exported {report.Exported}/{report.Matched} -> {Path.GetFileName(dest)}");
+            SetStatus($"已导出 {report.Exported}/{report.Matched} → {Path.GetFileName(dest)}");
         }
 
         private string OutputDirectory()
@@ -784,8 +787,8 @@ namespace AssetStudioMobile
         {
             if (_extractor == null || _extractor.BatchCount == 0)
             {
-                SetStatus("先 Scan 一次");
-                Append("先 Scan 一次，再来浏览。");
+                SetStatus("请先「重新扫描」一次");
+                Append("请先「重新扫描」一次，再来浏览。");
                 return;
             }
 
@@ -888,18 +891,18 @@ namespace AssetStudioMobile
             _indexing = true;
             try
             {
-                Append($"index: 正在索引 {string.Join("+", kinds)} …");
+                Append($"正在索引 {string.Join("+", kinds)} …");
                 var entries = _extractor.BuildIndex(
                     kinds,
                     (done, total) => _browser?.SetStatus($"索引中 {done}/{total} 批…"),
                     () => _browser == null);
 
-                Append($"index: {entries.Count} object(s)");
+                Append($"索引完成：{entries.Count} 个对象");
                 RunOnUiThread(() => _browser?.SetIndex(entries));
             }
             catch (Exception ex)
             {
-                Append($"index: 失败 {ex.Message}");
+                Append($"索引失败：{ex.Message}");
                 RunOnUiThread(() => _browser?.SetStatus("索引失败：" + ex.Message));
             }
             finally
@@ -919,7 +922,7 @@ namespace AssetStudioMobile
             }
             catch (Exception ex)
             {
-                Append($"index: 加载失败 {ex.Message}");
+                Append($"加载条目失败：{ex.Message}");
             }
 
             RunOnUiThread(() => _browser?.ShowIndexed(entry, loaded));

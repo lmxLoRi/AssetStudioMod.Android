@@ -92,12 +92,12 @@ namespace AssetStudio
             var flag = false;
             var mark = System.Diagnostics.Stopwatch.GetTimestamp();
             var buff = BigArrayPool<byte>.Shared.Rent(reader.Size);
-            Texture2DExtensions.PhaseTiming?.Invoke("  read input", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
+            Texture2DExtensions.PhaseTiming?.Invoke("  读取输入", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
             try
             {
                 mark = System.Diagnostics.Stopwatch.GetTimestamp();
                 _ = reader.GetData(buff);
-                Texture2DExtensions.PhaseTiming?.Invoke("  read input", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
+                Texture2DExtensions.PhaseTiming?.Invoke("  读取输入", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
 
                 // Dev hook: hands the raw compressed bytes to the caller before decoding. Used once to
                 // capture real ASTC payloads from a game, because a benchmark on a test image is only
@@ -297,7 +297,7 @@ namespace AssetStudio
                         break;
                 }
 
-                Texture2DExtensions.PhaseTiming?.Invoke("  format decode", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
+                Texture2DExtensions.PhaseTiming?.Invoke("  格式解码", System.Diagnostics.Stopwatch.GetTimestamp() - mark);
             }
             finally
             {

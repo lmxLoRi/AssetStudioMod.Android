@@ -59,7 +59,7 @@ namespace AssetStudio
             var converter = new Texture2DConverter(m_Texture2D);
             var mark = System.Diagnostics.Stopwatch.GetTimestamp();
             var buff = BigArrayPool<byte>.Shared.Rent(converter.OutputDataSize);
-            Phase("rent buffer", mark);
+            Phase("租借缓冲", mark);
 
             var spanBuff = buff.AsSpan(0, converter.OutputDataSize);
             try
@@ -67,7 +67,7 @@ namespace AssetStudio
                 mark = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (!converter.DecodeTexture2D(buff))
                     return null;
-                Phase("codec decode", mark);
+                Phase("编解码", mark);
 
                 mark = System.Diagnostics.Stopwatch.GetTimestamp();
                 Image<Bgra32> image;
@@ -81,13 +81,13 @@ namespace AssetStudio
                 {
                     image = Image.LoadPixelData<Bgra32>(spanBuff, m_Texture2D.m_Width, m_Texture2D.m_Height);
                 }
-                Phase("LoadPixelData", mark);
+                Phase("拷贝进图", mark);
 
                 if (flip)
                 {
                     mark = System.Diagnostics.Stopwatch.GetTimestamp();
                     image.Mutate(x => x.Flip(FlipMode.Vertical));
-                    Phase("flip", mark);
+                    Phase("翻转", mark);
                 }
                 return image;
             }
@@ -95,7 +95,7 @@ namespace AssetStudio
             {
                 mark = System.Diagnostics.Stopwatch.GetTimestamp();
                 BigArrayPool<byte>.Shared.Return(buff, clearArray: true);
-                Phase("return+clear", mark);
+                Phase("归还+清零", mark);
             }
         }
 

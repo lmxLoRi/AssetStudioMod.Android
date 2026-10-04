@@ -107,7 +107,7 @@ namespace AssetStudioMobile
                 foreach (var kv in Unexported) u.Add($"{kv.Key}={kv.Value}");
                 parts.Add("no exporter: " + string.Join(",", u));
             }
-            return $"matched={Matched} exported={Exported} skipped={Skipped} failed={Failed} [{string.Join(" ", parts)}]";
+            return $"匹配={Matched} 导出={Exported} 跳过={Skipped} 失败={Failed} [{string.Join(" ", parts)}]";
         }
     }
 
@@ -351,11 +351,11 @@ namespace AssetStudioMobile
             if (filter != null)
             {
                 _assetsManager.SetAssetFilter(filter);
-                LogInfo($"loading only {string.Join(", ", filter)} objects");
+                LogInfo($"只加载这些类型：{string.Join(", ", filter)}");
             }
 
             var full = Path.GetFullPath(root);
-            LogInfo($"Scanning {full}");
+            LogInfo($"扫描 {full}");
 
             var clock = Stopwatch.StartNew();
 
@@ -386,8 +386,8 @@ namespace AssetStudioMobile
             var sniffMs = clock.ElapsedMilliseconds;
             clock.Restart();
 
-            LogInfo($"{candidates.Count} candidate file(s) of {everything.Length} " +
-                    $"(walk {walkMs} ms, sniff {sniffMs} ms, dropped {everything.Length - candidates.Count})");
+            LogInfo($"{everything.Length} 个文件中有 {candidates.Count} 个候选 " +
+                    $"（遍历 {walkMs} ms，嗅探 {sniffMs} ms，排除 {everything.Length - candidates.Count}）");
             Report(0, candidates.Count);
 
             _candidates = candidates;
@@ -417,7 +417,7 @@ namespace AssetStudioMobile
                 {
                     AssetStudio.Progress.Default = previous;
                 }
-                LogInfo($"Loaded {LoadedFiles} serialized file(s), {LoadedObjects} object(s) from {_lastParent}");
+                LogInfo($"已加载 {LoadedFiles} 个序列化文件、{LoadedObjects} 个对象，来自 {_lastParent}");
             }
             else
             {
@@ -427,11 +427,11 @@ namespace AssetStudioMobile
                 // line before the real work had started. Export accumulates and reports them
                 // instead, so they still appear -- just when they are actually known.
                 _released = true;
-                LogInfo($"{_candidates.Count} candidate file(s) in {batches.Count} batches, " +
-                        $"loaded during export (at most {BatchFiles} files or {BatchBytes / (1024 * 1024)} MB each)");
+                LogInfo($"{_candidates.Count} 个候选文件分 {batches.Count} 批，" +
+                        $"导出时加载（每批最多 {BatchFiles} 个文件或 {BatchBytes / (1024 * 1024)} MB）");
             }
 
-            LogInfo($"load {clock.ElapsedMilliseconds} ms");
+            LogInfo($"加载耗时 {clock.ElapsedMilliseconds} ms");
             Report(1, 1);
         }
 
@@ -749,7 +749,7 @@ namespace AssetStudioMobile
                 }
                 catch (Exception ex)
                 {
-                    LogWarn($"lua: cannot read {Path.GetFileName(file)}: {ex.Message}");
+                    LogWarn($"lua：读不了 {Path.GetFileName(file)}：{ex.Message}");
                     continue;
                 }
 
@@ -775,11 +775,11 @@ namespace AssetStudioMobile
                 }
                 catch (Exception ex)
                 {
-                    LogWarn($"lua: cannot write decrypted {Path.GetFileName(file)}: {ex.Message}");
+                    LogWarn($"lua：写不了解密结果 {Path.GetFileName(file)}：{ex.Message}");
                 }
             }
 
-            LogInfo($"lua: {rewritten} file(s) rewritten, {failed} failed");
+            LogInfo($"lua：改写 {rewritten} 个文件，失败 {failed} 个");
             return result;
         }
 
@@ -1022,8 +1022,8 @@ namespace AssetStudioMobile
             // batch however many bundles the tree has, which is the point -- a 4.1 GB cache exports
             // in the same footprint as a small one.
             var batches = new List<(int Start, int Count)>(Batches(_candidates));
-            LogInfo($"exporting {_candidates.Count} file(s) in {batches.Count} batches on {ExportThreads} thread(s) " +
-                    $"(at most {BatchFiles} files or {BatchBytes / (1024 * 1024)} MB each)");
+            LogInfo($"分 {batches.Count} 批、{ExportThreads} 线程导出 {_candidates.Count} 个文件 " +
+                    $"（每批最多 {BatchFiles} 个文件或 {BatchBytes / (1024 * 1024)} MB）");
 
             var list = _candidates;
             var done = 0;
@@ -1038,7 +1038,7 @@ namespace AssetStudioMobile
                 {
                     var loadMark = Stopwatch.GetTimestamp();
                     LoadBatch(worker.Manager, list, batch.Start, batch.Count, out var f, out var o, out _);
-                    Stats.AddPhase("export: load batch", Stopwatch.GetTimestamp() - loadMark);
+                    Stats.AddPhase("导出：加载一批", Stopwatch.GetTimestamp() - loadMark);
 
                     Interlocked.Add(ref _loadedFiles, f);
                     Interlocked.Add(ref _loadedObjects, o);
@@ -1051,7 +1051,7 @@ namespace AssetStudioMobile
                 },
                 worker => worker.Dispose());
 
-            LogInfo($"read {LoadedFiles} serialized file(s), {LoadedObjects} object(s) total");
+            LogInfo($"共读入 {LoadedFiles} 个序列化文件、{LoadedObjects} 个对象");
             Finish(report);
             var summary = Stats.Report();
             LogInfo(summary);
@@ -1063,7 +1063,7 @@ namespace AssetStudioMobile
             if (!string.IsNullOrEmpty(ReportPath))
             {
                 try { File.WriteAllText(ReportPath, summary); }
-                catch (Exception ex) { LogWarn($"could not write the report: {ex.Message}"); }
+                catch (Exception ex) { LogWarn($"报告写不出去：{ex.Message}"); }
             }
             return report;
         }
@@ -1148,7 +1148,7 @@ namespace AssetStudioMobile
                         report.SkippedByType[skippedType] = Get(report.SkippedByType, skippedType) + 1;
 
                         if (report.Skipped <= 5)
-                            LogWarn($"skip: {dest} is already claimed by another object");
+                            LogWarn($"跳过：{dest} 已被另一个对象占用");
                     }
                     else
                     {
@@ -1223,19 +1223,19 @@ namespace AssetStudioMobile
 
             if (report.SkippedByType.Count > 0)
             {
-                LogWarn($"{report.Skipped} skipped as duplicate paths: " + string.Join(" ",
+                LogWarn($"{report.Skipped} 个因路径重复被跳过：" + string.Join(" ",
                     report.SkippedByType.OrderByDescending(kv => kv.Value).Take(8)
                         .Select(kv => $"{kv.Key}x{kv.Value}")));
             }
 
             if (report.RawFallback > 0)
             {
-                LogInfo($"{report.RawFallback} object(s) had no readable fields and were written as raw bytes");
+                LogInfo($"{report.RawFallback} 个对象没有可读字段，已写出原始字节");
             }
 
             if (report.Unexported.Count > 0)
             {
-                LogWarn("no exporter for: " + string.Join(", ",
+                LogWarn("没有可用的导出器：" + string.Join(", ",
                     report.Unexported.OrderBy(kv => kv.Key, StringComparer.Ordinal)
                         .Select(kv => $"{kv.Key}x{kv.Value}")));
             }

@@ -92,35 +92,35 @@ namespace AssetStudioMobile
         {
             var sb = new StringBuilder();
             sb.AppendLine();
-            sb.AppendLine("--- measured in-process ---");
+            sb.AppendLine("--- 进程内实测 ---");
 
             var lz4ms = Ms(Volatile.Read(ref _lz4Ticks));
             var lz4Bytes = Volatile.Read(ref _lz4Bytes);
             sb.AppendLine(lz4Bytes > 0
-                ? $"    LZ4 decode       {lz4ms / 1000,8:F1}s  {lz4Bytes / 1048576.0 / (lz4ms / 1000),7:F0} MB/s  ({lz4Bytes / 1048576} MB in)"
-                : "    LZ4 decode       (native decoder not installed)");
+                ? $"    LZ4 解压          {lz4ms / 1000,8:F1}s  {lz4Bytes / 1048576.0 / (lz4ms / 1000),7:F0} MB/s  ({lz4Bytes / 1048576} MB in)"
+                : "    LZ4 解压          （未装原生解码器）");
 
             var texMs = Ms(Volatile.Read(ref _texTicks));
             var texN = Volatile.Read(ref _texCount);
             var texPx = Volatile.Read(ref _texPixels);
             sb.AppendLine(texN > 0
-                ? $"    texture decode   {texMs / 1000,8:F1}s  {texN,8} images  {texN / (texMs / 1000),6:F0}/s  {texPx / 1048576.0 / (texMs / 1000),6:F0} MPix/s"
-                : "    texture decode   (none)");
+                ? $"    贴图解码          {texMs / 1000,8:F1}s  {texN,8} images  {texN / (texMs / 1000),6:F0}/s  {texPx / 1048576.0 / (texMs / 1000),6:F0} MPix/s"
+                : "    贴图解码          （无）");
 
             var encMs = Ms(Volatile.Read(ref _encodeTicks));
             var encN = Volatile.Read(ref _encodeCount);
             sb.AppendLine(encN > 0
-                ? $"    PNG encode+write {encMs / 1000,8:F1}s  {encN,8} files   {encN / (encMs / 1000),6:F0}/s"
-                : "    PNG encode+write (none)");
+                ? $"    PNG 编码+写出     {encMs / 1000,8:F1}s  {encN,8} files   {encN / (encMs / 1000),6:F0}/s"
+                : "    PNG 编码+写出     （无）");
 
             var rawN = Volatile.Read(ref _rawCount);
             if (rawN > 0)
-                sb.AppendLine($"    raw texture out  {Volatile.Read(ref _rawBytes) / 1048576,8} MB  {rawN,8} files");
+                sb.AppendLine($"    贴图原始字节      {Volatile.Read(ref _rawBytes) / 1048576,8} MB  {rawN,8} files");
 
             // Slowest format first, which is the point of keeping them apart.
             if (ByFormat.Count > 0)
             {
-                sb.AppendLine("    texture decode by format:");
+                sb.AppendLine("    按格式拆分贴图解码：");
                 foreach (var kv in ByFormat.OrderByDescending(kv => Volatile.Read(ref kv.Value.Ticks)).Take(10))
                 {
                     var s = kv.Value;
@@ -135,7 +135,7 @@ namespace AssetStudioMobile
 
             if (ByPhase.Count > 0)
             {
-                sb.AppendLine("    ConvertToImage by phase:");
+                sb.AppendLine("    ConvertToImage 分阶段：");
                 foreach (var kv in ByPhase.OrderByDescending(kv => Volatile.Read(ref kv.Value[0])))
                 {
                     var ms = Ms(Volatile.Read(ref kv.Value[0]));

@@ -139,10 +139,10 @@ namespace AssetStudioMobile
         /// the provider, which is slower, but it needs no permission at all and the picked file is
         /// one file rather than a tree.
         /// </summary>
-        public static string StagePickedApk(Context context, Android.Net.Uri uri, string stagingRoot,
+        public static string StagePickedFile(Context context, Android.Net.Uri uri, string stagingRoot,
                                             Action<string> log)
         {
-            var name = Sanitize(ImportUtils.LeafNameOf(uri) ?? "picked.apk");
+            var name = Sanitize(ImportUtils.LeafNameOf(uri) ?? "picked");
             var dest = Path.Combine(stagingRoot, "apk", "picked");
             Directory.CreateDirectory(dest);
             var target = Path.Combine(dest, name);
@@ -150,17 +150,17 @@ namespace AssetStudioMobile
             try
             {
                 using var input = context.ContentResolver.OpenInputStream(uri);
-                if (input == null) { log?.Invoke("ERROR: the picker returned no stream"); return null; }
+                if (input == null) { log?.Invoke("错误：文件选择器没有返回数据流"); return null; }
                 using var output = File.Create(target);
                 input.CopyTo(output);
             }
             catch (Exception ex)
             {
-                log?.Invoke($"ERROR: cannot copy the picked APK: {ex.GetType().Name}: {ex.Message}");
+                log?.Invoke($"错误：复制所选文件失败：{ex.GetType().Name}: {ex.Message}");
                 return null;
             }
 
-            log?.Invoke($"staged {name}, {new FileInfo(target).Length / 1048576} MB");
+            log?.Invoke($"已暂存 {name}，{new FileInfo(target).Length / 1048576} MB");
             return dest;
         }
 

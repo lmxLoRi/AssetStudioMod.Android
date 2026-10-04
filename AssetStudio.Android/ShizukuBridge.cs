@@ -62,7 +62,7 @@ namespace AssetStudioMobile
             switch (State)
             {
                 case ShizukuState.Ready:
-                    return $"Shizuku: ready (uid {SafeUid()})";
+                    return $"Shizuku：已就绪（uid {SafeUid()}）";
                 case ShizukuState.PermissionDenied:
                     return "Shizuku: running, permission not granted to this app";
                 case ShizukuState.NotRunning:

@@ -83,43 +83,43 @@ namespace AssetStudioMobile.Ui
             _activity = activity;
             var root = new LinearLayout(activity) { Orientation = Orientation.Vertical };
 
-            _shizuku = new Button(activity) { Text = "Shizuku: request permission" };
+            _shizuku = new Button(activity) { Text = "Shizuku：申请权限" };
             _shizuku.Click += (_, _) => ShizukuRequested?.Invoke();
             root.AddView(_shizuku);
 
-            _grant = new Button(activity) { Text = "Grant all-files access" };
+            _grant = new Button(activity) { Text = "授予所有文件访问权限" };
             _grant.Click += (_, _) => GrantRequested?.Invoke();
             root.AddView(_grant);
 
             PermissionStatus = new TextView(activity) { TextSize = 11f };
             root.AddView(PermissionStatus);
 
-            root.AddView(new TextView(activity) { Text = "Bundle folder" });
+            root.AddView(new TextView(activity) { Text = "资源文件夹" });
             var inputRow = new LinearLayout(activity) { Orientation = Orientation.Horizontal };
             InputPath = new EditText(activity) { Hint = "/sdcard/Download/mygame", TextSize = 12f };
             InputPath.LayoutParameters = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f);
             inputRow.AddView(InputPath);
-            var load = new Button(activity) { Text = "Load" };
+            var load = new Button(activity) { Text = "加载" };
             load.Click += (_, _) => LoadRequested?.Invoke();
             inputRow.AddView(load);
             root.AddView(inputRow);
 
-            _import = new Button(activity) { Text = "Pick folder" };
+            _import = new Button(activity) { Text = "选择文件夹" };
             _import.Click += (_, _) => PickFolderRequested?.Invoke();
             root.AddView(_import);
 
             // An APK is a ZIP, and the loader already handles ZIPs, so both of these end the same
             // way as picking a folder: stage the bytes somewhere readable, then Scan.
             var apkRow = new LinearLayout(activity) { Orientation = Orientation.Horizontal };
-            var pickApk = new Button(activity) { Text = "Pick .apk" };
+            var pickApk = new Button(activity) { Text = "选择文件" };
             pickApk.Click += (_, _) => PickApkRequested?.Invoke();
             apkRow.AddView(pickApk);
-            var fromApp = new Button(activity) { Text = "Import from app" };
+            var fromApp = new Button(activity) { Text = "从已安装应用导入" };
             fromApp.Click += (_, _) => ImportFromAppRequested?.Invoke();
             apkRow.AddView(fromApp);
             root.AddView(apkRow);
 
-            _scan = new Button(activity) { Text = "Rescan" };
+            _scan = new Button(activity) { Text = "重新扫描" };
             _scan.Click += (_, _) => ScanRequested?.Invoke();
             root.AddView(_scan);
 
@@ -145,11 +145,11 @@ namespace AssetStudioMobile.Ui
             _scriptLabel = new TextView(activity) { TextSize = 11f, Text = "未加载解密脚本" };
             root.AddView(_scriptLabel);
 
-            root.AddView(new TextView(activity) { Text = "Export to" });
+            root.AddView(new TextView(activity) { Text = "导出到" });
             OutputPath = new EditText(activity) { TextSize = 12f };
             root.AddView(OutputPath);
 
-            var selftest = new Button(activity) { Text = "Run codec self-test" };
+            var selftest = new Button(activity) { Text = "运行解码器自检" };
             selftest.Click += (_, _) => SelfTestRequested?.Invoke();
             root.AddView(selftest);
 
@@ -193,7 +193,7 @@ namespace AssetStudioMobile.Ui
             {
                 _import.Enabled = !busy;
                 _scan.Enabled = !busy;
-                if (busy) _status.Text = "Working...";
+                if (busy) _status.Text = "处理中…";
             });
         }
 
