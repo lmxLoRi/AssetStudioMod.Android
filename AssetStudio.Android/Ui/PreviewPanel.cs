@@ -463,7 +463,9 @@ namespace AssetStudioMobile.Ui
             if (image == null) return null;
             var bytes = new byte[image.Width * image.Height * 4];
             image.CopyPixelDataTo(bytes);
-            return ToBitmap(bytes, image.Width, image.Height);
+
+            // Already the right way up; see the note in ToBitmap.
+            return ToBitmap(bytes, image.Width, image.Height, flipVertical: false);
         }
 
         /// <summary>
@@ -473,7 +475,7 @@ namespace AssetStudioMobile.Ui
         /// ARGB_8888 is RGBA in memory, and an int per pixel makes the channel order explicit
         /// instead of something to be discovered from a wrong-looking preview.
         /// </summary>
-        private static Bitmap ToBitmap(byte[] bgra, int width, int height)
+        private static Bitmap ToBitmap(byte[] bgra, int width, int height, bool flipVertical = true)
         {
             if (width <= 0 || height <= 0) return null;
             if ((long)width * height * 4 > bgra.Length) return null;
@@ -487,12 +489,15 @@ namespace AssetStudioMobile.Ui
             {
                 var sy = scale >= 1.0 ? y : Math.Min(height - 1, (int)(y / scale));
 
-                // Decoders write pixels bottom-up, in OpenGL order, and the export flips them
-                // inside the PNG encoder. A preview has no encoder in the path, so the flip has to
-                // happen here -- without it every image is upside down. Sprites come out of
-                // SpriteHelper the same way up (it calls ConvertToImage(flip: false) too), so one
-                // flip covers both.
-                sy = height - 1 - sy;
+                // Decoders write pixels bottom-up, in OpenGL order, and the export flips them inside
+                // the PNG encoder. A preview has no encoder in the path, so a texture's flip has to
+                // happen here or it is upside down.
+                //
+                // Sprites are the exception and must not be flipped again: SpriteHelper.CutImage
+                // ends with an unconditional Flip(Vertical) on both of its return paths, so the
+                // image it hands back is already the right way up. Flipping it here turned every
+                // sprite upside down, which is exactly what the first version of this did.
+                if (flipVertical) sy = height - 1 - sy;
 
                 var sourceRow = sy * width;
                 var targetRow = y * w;
