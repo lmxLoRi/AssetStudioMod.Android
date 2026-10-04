@@ -27,6 +27,19 @@ namespace AssetStudioMobile
         Sprite,
         Mesh,
         TextAsset,
+
+        /// <summary>AudioClips, written as .wav or .ogg depending on what they hold.</summary>
+        Audio,
+
+        /// <summary>MonoBehaviours as JSON, which is what their fields only exist as.</summary>
+        MonoBehaviour,
+
+        /// <summary>Fonts, as the .ttf/.otf the file holds.</summary>
+        Font,
+
+        /// <summary>VideoClips, as whatever container the file holds.</summary>
+        Video,
+
         JsonDump,
         RawData,
 
@@ -53,6 +66,12 @@ namespace AssetStudioMobile
         public int Exported;
         public int Skipped;
         public int Failed;
+
+        /// <summary>Objects Auto could not describe, written as the bytes the file holds instead.</summary>
+        public int RawFallback;
+
+        /// <summary>Skips by type, so "3370 skipped" says which assets it was talking about.</summary>
+        public readonly Dictionary<string, int> SkippedByType = new Dictionary<string, int>();
         public readonly List<string> Errors = new List<string>();
 
         /// <summary>How many assets produced output, keyed by ClassIDType.</summary>
@@ -199,8 +218,32 @@ namespace AssetStudioMobile
             ExportKind.Sprite => new[] { ClassIDType.Sprite },   // also pulls Texture2D + SpriteAtlas
             ExportKind.Mesh => new[] { ClassIDType.Mesh },
             ExportKind.TextAsset => new[] { ClassIDType.TextAsset },
+            ExportKind.Audio => new[] { ClassIDType.AudioClip },
+            ExportKind.MonoBehaviour => new[] { ClassIDType.MonoBehaviour },
+            ExportKind.Font => new[] { ClassIDType.Font },
+            ExportKind.Video => new[] { ClassIDType.VideoClip },
             ExportKind.TextureRaw => new[] { ClassIDType.Texture2D },
             _ => null,
+        };
+
+        /// <summary>
+        /// The categories the browser offers.
+        ///
+        /// They come from the same enum the export kind list does, because keeping two lists had
+        /// already gone wrong: the export could not export audio at all, the browser could not
+        /// filter on it, and neither list showed the other's categories.
+        /// </summary>
+        public static readonly ExportKind[] BrowserKinds =
+        {
+            ExportKind.Auto,
+            ExportKind.Texture,
+            ExportKind.Sprite,
+            ExportKind.Mesh,
+            ExportKind.TextAsset,
+            ExportKind.Audio,
+            ExportKind.MonoBehaviour,
+            ExportKind.Font,
+            ExportKind.Video,
         };
 
         /// <summary>One scanned file, with the size the sniff already read.</summary>
@@ -857,9 +900,16 @@ namespace AssetStudioMobile
                     if (!claimed.TryAdd(dest, true))
                     {
                         report.Skipped++;
+                        var skippedType = obj.type.ToString();
+                        report.SkippedByType[skippedType] = Get(report.SkippedByType, skippedType) + 1;
+
+                        if (report.Skipped <= 5)
+                            LogWarn($"skip: {dest} is already claimed by another object");
                     }
                     else
                     {
+                        if (plan.Extension == ".rawdata" && options.Kind != ExportKind.RawData) report.RawFallback++;
+
                         try
                         {
                             if (File.Exists(dest) && !options.Overwrite)
@@ -904,6 +954,8 @@ namespace AssetStudioMobile
             into.Exported += from.Exported;
             into.Skipped += from.Skipped;
             into.Failed += from.Failed;
+            into.RawFallback += from.RawFallback;
+            foreach (var kv in from.SkippedByType) into.SkippedByType[kv.Key] = Get(into.SkippedByType, kv.Key) + kv.Value;
 
             foreach (var kv in from.ByType) into.ByType[kv.Key] = Get(into.ByType, kv.Key) + kv.Value;
             foreach (var kv in from.Unexported) into.Unexported[kv.Key] = Get(into.Unexported, kv.Key) + kv.Value;
@@ -925,6 +977,18 @@ namespace AssetStudioMobile
                         .Select(kv => $"{kv.Key} x{kv.Value}")));
             }
 
+            if (report.SkippedByType.Count > 0)
+            {
+                LogWarn($"{report.Skipped} skipped as duplicate paths: " + string.Join(" ",
+                    report.SkippedByType.OrderByDescending(kv => kv.Value).Take(8)
+                        .Select(kv => $"{kv.Key}x{kv.Value}")));
+            }
+
+            if (report.RawFallback > 0)
+            {
+                LogInfo($"{report.RawFallback} object(s) had no readable fields and were written as raw bytes");
+            }
+
             if (report.Unexported.Count > 0)
             {
                 LogWarn("no exporter for: " + string.Join(", ",
@@ -936,9 +1000,16 @@ namespace AssetStudioMobile
         private static int Get(Dictionary<string, int> d, string k)
             => d.TryGetValue(k, out var v) ? v : 0;
 
-        private static bool Matches(AssetStudio.Object o, ExportKind kind) => kind switch
+        internal static bool Matches(AssetStudio.Object o, ExportKind kind) => kind switch
         {
-            ExportKind.Auto => HasExporter(o),
+            // Everything has an exporter: Plan() falls back to the bytes the file holds when nothing
+            // can describe the object. Deciding that here by calling Plan() meant dumping every
+            // object twice on an Auto export -- once to decide, once to write.
+            ExportKind.Auto => true,
+            ExportKind.Audio => o is AudioClip,
+            ExportKind.MonoBehaviour => o is MonoBehaviour,
+            ExportKind.Font => o is Font f && f.m_FontData != null && f.m_FontData.Length > 0,
+            ExportKind.Video => o is VideoClip v && v.m_VideoData != null && v.m_ExternalResources.m_Size > 0,
             ExportKind.Texture => o is Texture2D t && t.m_Width > 0 && t.m_Height > 0,
             ExportKind.Sprite => o is Sprite s && s.m_Rect.width > 0 && s.m_Rect.height > 0,
             ExportKind.Mesh => o is Mesh,
@@ -1070,17 +1141,27 @@ namespace AssetStudioMobile
                 default:
                     if (options.Kind == ExportKind.RawData)
                     {
+                        return RawPlan();
+                    }
+
+                    // Decided here rather than inside the writer: the extension has to be known
+                    // before the output path is built, and asking "can this be dumped?" is the same
+                    // work as dumping it.
+                    var json = TryDump(o);
+                    if (json != null)
+                    {
                         return new ExportPlan
                         {
-                            Extension = ".rawdata",
-                            Write = (obj, dest, opt) => File.WriteAllBytes(dest, obj.GetRawData()),
+                            Extension = ".json",
+                            Write = (obj, dest, opt) => File.WriteAllText(dest, json, new UTF8Encoding(false)),
                         };
                     }
-                    return new ExportPlan
-                    {
-                        Extension = ".json",
-                        Write = (obj, dest, opt) => WriteJson(obj, dest),
-                    };
+
+                    // No embedded type tree and no fields reflection can read. Writing the bytes the
+                    // file holds is the only honest thing left, and it is what makes Auto mean
+                    // "everything" instead of "everything that happens to be dumpable" -- 3413 of
+                    // 10706 objects in one test game were silently dropped without it.
+                    return RawPlan();
             }
         }
 
@@ -1100,6 +1181,30 @@ namespace AssetStudioMobile
         }
 
         private static bool HasExporter(AssetStudio.Object o) => Plan(o, new ExportOptions()) != null;
+
+        private static ExportPlan RawPlan() => new ExportPlan
+        {
+            Extension = ".rawdata",
+            Write = (obj, dest, opt) => File.WriteAllBytes(dest, obj.GetRawData()),
+        };
+
+        /// <summary>
+        /// The object as JSON, or null when neither the embedded type tree nor reflection over the
+        /// parsed fields can describe it. DumpObject swallows its own failures and returns null, so
+        /// null here means "nothing to say", not "an error happened".
+        /// </summary>
+        private static string TryDump(AssetStudio.Object o)
+        {
+            try
+            {
+                var json = o.Dump() ?? o.DumpObject();
+                return string.IsNullOrEmpty(json) ? null : json;
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
         private static void WriteJson(AssetStudio.Object obj, string dest)
         {
@@ -1201,8 +1306,37 @@ namespace AssetStudioMobile
         internal static string DisplayName(AssetStudio.Object obj)
         {
             var name = (obj as NamedObject)?.m_Name;
+
+            // A pathID is only unique inside one SerializedFile, and an APK's Data folder holds
+            // dozens of .assets files that each number from 1. Everything without a name therefore
+            // collapsed onto paths like unnamed_1.json: 3370 objects out of 10706 in one test game
+            // were skipped as duplicates of each other, which is what "Auto does not export
+            // everything" turned out to be.
+            //
+            // Named assets keep the plain name_pathID. The source tag goes only where the name
+            // carries no information at all, so existing output names do not move.
+            if (string.IsNullOrEmpty(name))
+            {
+                var source = SourceTag(obj);
+                return source == null ? $"unnamed_{obj.m_PathID}" : $"unnamed_{source}_{obj.m_PathID}";
+            }
+
+            return $"{SafeName(name)}_{obj.m_PathID}";
+        }
+
+        /// <summary>The file an object came from, as a short name to disambiguate by.</summary>
+        private static string SourceTag(AssetStudio.Object obj)
+        {
+            var file = obj.assetsFile;
+            var path = file?.fileName;
+            if (string.IsNullOrEmpty(path)) path = file?.fullName;
+            if (string.IsNullOrEmpty(path)) return null;
+
+            var name = Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(name)) return null;
+
             var safe = SafeName(name);
-            return $"{safe}_{obj.m_PathID}";
+            return safe == "unnamed" ? null : safe;
         }
 
         internal static string SafeName(string name)

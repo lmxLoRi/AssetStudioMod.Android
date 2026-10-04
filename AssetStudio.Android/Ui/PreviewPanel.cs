@@ -59,11 +59,14 @@ namespace AssetStudioMobile.Ui
         private readonly ArrayAdapter<string> _adapter;
 
         /// <summary>
-        /// The type filter. Added after driving the browser on a real game: a batch of 10706 objects
-        /// contained 4204 MonoBehaviours, mostly unnamed, and every Sprite in it was unreachable
-        /// behind them. Counting them is useful; having to scroll past them is not.
+        /// Labels for <see cref="Extractor.BrowserKinds"/>, one per entry and in the same order.
+        ///
+        /// Kept beside it rather than as its own list because two lists is what went wrong: the
+        /// export could not export audio and the browser could not filter on it, and neither showed
+        /// the other's categories. Anything added to BrowserKinds needs a label here.
         /// </summary>
-        private static readonly string[] Filters = { "全部", "贴图", "Sprite", "文本", "音频", "脚本" };
+        private static readonly string[] FilterLabels =
+            { "全部", "贴图", "Sprite", "网格", "文本", "音频", "脚本", "字体", "视频" };
 
         private readonly List<Object> _all = new List<Object>();
         private readonly List<Object> _items = new List<Object>();
@@ -96,7 +99,7 @@ namespace AssetStudioMobile.Ui
             var close = UiKit.Button(context, "返回导出", () => Closed?.Invoke());
 
             _filter = new Spinner(context);
-            _filter.Adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleSpinnerDropDownItem, Filters);
+            _filter.Adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleSpinnerDropDownItem, FilterLabels);
             _filter.ItemSelected += (_, e) => ApplyFilter((int)e.Position);
 
             // A batch can be ten thousand objects, and the type filter alone still leaves thousands
@@ -125,10 +128,6 @@ namespace AssetStudioMobile.Ui
                                            UiKit.Dp(context, 12), UiKit.Dp(context, 12));
         }
 
-        /// <summary>Only these can be shown; everything else would be a dead row that does nothing.</summary>
-        public static bool IsPreviewable(Object o)
-            => o is Texture2D || o is Sprite || o is TextAsset || o is AudioClip || o is MonoBehaviour;
-
         public void SetBatch(int index, IReadOnlyList<Object> objects)
         {
             _batch = index;
@@ -137,6 +136,12 @@ namespace AssetStudioMobile.Ui
 
             ShowList();
             ApplyFilter(_filter.SelectedItemPosition);
+
+            // Without this the list keeps its scroll offset, so changing batch lands you in the
+            // middle of the new one and reads as "it loaded more below" rather than "this is the
+            // next batch".
+            _list.SetSelection(0);
+
             _previous.Enabled = index > 0;
             _next.Enabled = index < _batchCount - 1;
         }
@@ -144,16 +149,18 @@ namespace AssetStudioMobile.Ui
         private void ApplyFilter(int filter)
         {
             var query = _search.Text?.Trim();
+            var kind = Extractor.BrowserKinds[Math.Min(filter, Extractor.BrowserKinds.Length - 1)];
 
             _items.Clear();
-            _items.AddRange(_all.Where(o => Matches(o, filter) && MatchesQuery(o, query)));
+            _items.AddRange(_all.Where(o => Extractor.Matches(o, kind) && MatchesQuery(o, query)));
 
             _adapter.Clear();
             _adapter.AddAll(_items.Select(Describe).ToList());
             _adapter.NotifyDataSetChanged();
 
             var byName = string.IsNullOrEmpty(query) ? "" : $"“{query}” ";
-            _title.Text = $"第 {_batch + 1}/{_batchCount} 批 · {Filters[filter]} {byName}{_items.Count} / 共 {_all.Count} 个对象";
+            var label = FilterLabels[Math.Min(filter, FilterLabels.Length - 1)];
+            _title.Text = $"第 {_batch + 1}/{_batchCount} 批 · {label} {byName}{_items.Count} / 共 {_all.Count} 个对象";
         }
 
         private static bool MatchesQuery(Object o, string query)
@@ -164,15 +171,7 @@ namespace AssetStudioMobile.Ui
             return name != null && name.Contains(query, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static bool Matches(Object o, int filter) => filter switch
-        {
-            1 => o is Texture2D,
-            2 => o is Sprite,
-            3 => o is TextAsset,
-            4 => o is AudioClip,
-            5 => o is MonoBehaviour,
-            _ => IsPreviewable(o),
-        };
+
 
         /// <summary>A one-line message where the batch summary normally sits.</summary>
         public void SetStatus(string message) => _ui(() => _title.Text = message);
