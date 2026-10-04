@@ -65,6 +65,7 @@ namespace AssetStudioMobile.Ui
         private readonly List<Object> _all = new List<Object>();
         private readonly List<Object> _items = new List<Object>();
         private readonly Spinner _filter;
+        private readonly EditText _search;
         private int _batch;
         private int _token;
         private MediaPlayer _player;
@@ -87,6 +88,12 @@ namespace AssetStudioMobile.Ui
             _filter.Adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleSpinnerDropDownItem, Filters);
             _filter.ItemSelected += (_, e) => ApplyFilter((int)e.Position);
 
+            // A batch can be ten thousand objects, and the type filter alone still leaves thousands
+            // of them. Rebuilding the list per keystroke is a few milliseconds for that many rows.
+            _search = UiKit.Input(context, "");
+            _search.Hint = "按名字过滤";
+            _search.TextChanged += (_, _) => ApplyFilter(_filter.SelectedItemPosition);
+
             _adapter = new ArrayAdapter<string>(context, Android.Resource.Layout.SimpleListItem1);
             _list = new ListView(context) { Adapter = _adapter };
             _list.ItemClick += (_, e) =>
@@ -101,6 +108,7 @@ namespace AssetStudioMobile.Ui
             Root = UiKit.Column(context,
                 UiKit.Field(context, "浏览 · 一批一次加载，避免整棵资源树占用内存", _title),
                 UiKit.Row(context, close, _previous, _next, _filter),
+                _search,
                 UiKit.Fill(_page));
             ((LinearLayout)Root).SetPadding(UiKit.Dp(context, 12), UiKit.Dp(context, 12),
                                            UiKit.Dp(context, 12), UiKit.Dp(context, 12));
@@ -124,14 +132,25 @@ namespace AssetStudioMobile.Ui
 
         private void ApplyFilter(int filter)
         {
+            var query = _search.Text?.Trim();
+
             _items.Clear();
-            _items.AddRange(_all.Where(o => Matches(o, filter)));
+            _items.AddRange(_all.Where(o => Matches(o, filter) && MatchesQuery(o, query)));
 
             _adapter.Clear();
             _adapter.AddAll(_items.Select(Describe).ToList());
             _adapter.NotifyDataSetChanged();
 
-            _title.Text = $"第 {_batch + 1}/{_batchCount} 批 · {Filters[filter]} {_items.Count} / 共 {_all.Count} 个对象";
+            var byName = string.IsNullOrEmpty(query) ? "" : $"“{query}” ";
+            _title.Text = $"第 {_batch + 1}/{_batchCount} 批 · {Filters[filter]} {byName}{_items.Count} / 共 {_all.Count} 个对象";
+        }
+
+        private static bool MatchesQuery(Object o, string query)
+        {
+            if (string.IsNullOrEmpty(query)) return true;
+
+            var name = (o as NamedObject)?.m_Name;
+            return name != null && name.Contains(query, StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool Matches(Object o, int filter) => filter switch

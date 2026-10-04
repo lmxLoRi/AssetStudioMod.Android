@@ -47,23 +47,13 @@ namespace AssetStudioMobile.Ui
                     return null;
                 }
 
-                // AudioClipConverter's static constructor initialises FMOD unconditionally, so this
-                // throws before any format logic runs if the native library is not there. The app
-                // does not ship one for Android: the copies in the repo are glibc builds for desktop
-                // Linux and Bionic cannot load them. Saying that is more use than the raw type name.
-                AudioClipConverter converter;
-                try
-                {
-                    converter = new AudioClipConverter(clip);
-                }
-                catch (TypeInitializationException)
+                var converter = new AudioClipConverter(clip);
+
+                // Legacy clips are written straight to a wav header with no decoder involved, so
+                // they work even where FMOD cannot load. Everything else needs it.
+                if (!converter.IsLegacy && AudioClipConverter.UnavailableReason != null)
                 {
                     error = "这个构建没有音频解码后端（FMOD），Android 上还没有可用的原生库";
-                    return null;
-                }
-                catch (DllNotFoundException)
-                {
-                    error = "找不到 fmod 原生库，Android 上还没有可用的构建";
                     return null;
                 }
 
@@ -83,7 +73,11 @@ namespace AssetStudioMobile.Ui
 
                 if (wav == null || wav.Length < MinimumWavBytes)
                 {
-                    error = string.IsNullOrWhiteSpace(debug) ? "转换失败" : debug.Trim();
+                    // The library is only discovered to be missing once something tries to use it, so
+                    // the reason is known here rather than before the attempt.
+                    error = AudioClipConverter.UnavailableReason != null
+                        ? "这个构建没有音频解码后端（FMOD），Android 上还没有可用的原生库"
+                        : string.IsNullOrWhiteSpace(debug) ? "转换失败" : debug.Trim();
                     return null;
                 }
 

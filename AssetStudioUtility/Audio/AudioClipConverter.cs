@@ -12,19 +12,50 @@ namespace AssetStudio
         public bool IsSupport => m_AudioClip.IsConvertSupport();
         public bool IsLegacy => m_AudioClip.IsLegacyConvertSupport();
 
-        static AudioClipConverter()
+        private static bool systemReady;
+        private static string systemError;
+
+        /// <summary>
+        /// Brings FMOD up on first use rather than in a static constructor.
+        ///
+        /// RawAudioClipToWav needs no FMOD at all -- it writes a 44 byte header and copies the bytes
+        /// -- but it touches this type, so the static constructor used to initialise FMOD anyway and
+        /// threw before reaching it. On a platform without the native library that made the whole
+        /// class unusable, including the parts that never needed it. The failure is also remembered:
+        /// a missing library is not going to appear between two clips.
+        /// </summary>
+        private static bool EnsureSystem()
         {
-            var result = Factory.System_Create(out system);
-            if (result != RESULT.OK)
+            if (systemReady) return true;
+            if (systemError != null) return false;
+
+            try
             {
-                Logger.Error($"FMOD error! {result} - {Error.String(result)}");
+                var result = Factory.System_Create(out system);
+                if (result != RESULT.OK)
+                {
+                    systemError = $"FMOD error! {result} - {Error.String(result)}";
+                    return false;
+                }
+                result = system.init(1, INITFLAGS.NORMAL, IntPtr.Zero);
+                if (result != RESULT.OK)
+                {
+                    systemError = $"FMOD error! {result} - {Error.String(result)}";
+                    return false;
+                }
+                systemReady = true;
+                return true;
             }
-            result = system.init(1, INITFLAGS.NORMAL, IntPtr.Zero);
-            if (result != RESULT.OK)
+            catch (Exception e)
             {
-                Logger.Error($"FMOD error! {result} - {Error.String(result)}");
+                // DllNotFoundException or a type initialisation failure from the binding itself.
+                systemError = $"no usable FMOD native library ({e.GetType().Name})";
+                return false;
             }
         }
+
+        /// <summary>Null when FMOD is usable, otherwise why it is not.</summary>
+        public static string UnavailableReason => systemReady || systemError == null ? null : systemError;
 
         public AudioClipConverter(AudioClip audioClip)
         {
@@ -33,6 +64,12 @@ namespace AssetStudio
 
         public byte[] ConvertToWav(byte[] m_AudioData, ref string debugLog)
         {
+            if (!EnsureSystem())
+            {
+                debugLog += systemError + "\n";
+                return null;
+            }
+
             var exinfo = new CREATESOUNDEXINFO();
             exinfo.cbsize = Marshal.SizeOf(exinfo);
             exinfo.length = (uint)m_AudioClip.m_Size;
