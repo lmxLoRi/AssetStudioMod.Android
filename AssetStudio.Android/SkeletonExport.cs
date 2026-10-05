@@ -250,14 +250,14 @@ namespace AssetStudioMobile
             {
                 owner.Skeleton = asset;
 
-                // Published name first, so this agrees with the same asset exported as a TextAsset:
-                // the container carries the extension the game addresses it by, and a ".json" guessed
-                // here is how a skeleton written as "..._SkeletonData.asset" became "...json" and
-                // stopped matching what its own profile names.
-                var published = PublishedName(asset, containers);
-                owner.SkeletonName = !string.IsNullOrEmpty(published) && Path.HasExtension(published)
-                    ? published
-                    : bare + ".json";
+                // The asset's own name, with the extension the container publishes it under -- the
+                // same pair an ordinary TextAsset export produces, so the two agree.
+                //
+                // The container's whole file name is not used: it carries the game's internal
+                // "_SkeletonData" suffix, which is a name nothing else refers to and not the one the
+                // viewer's profile dialog shows.
+                var extension = Path.GetExtension(PublishedName(asset, containers));
+                owner.SkeletonName = string.IsNullOrEmpty(extension) ? bare + ".json" : bare + extension;
                 return true;
             }
 
