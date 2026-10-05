@@ -338,10 +338,15 @@ namespace AssetStudioMobile
         /// </summary>
         public void Load(string root, IReadOnlyCollection<ExportKind> categories)
         {
-            if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
+            // A single file is a valid input, not only a folder. Without this the caller had to
+            // copy a picked or typed file into a directory of its own first, which is a copy of the
+            // whole thing for no reason when it can simply be opened where it lies.
+            if (!File.Exists(root) && !Directory.Exists(root))
+                throw new FileNotFoundException(root);
 
             LoadedCategories = categories ?? Array.Empty<ExportKind>();
             _indexedCandidate = -1;
+            _candidateByPath = null;
             _assetsManager.LoadViaTypeTree = UseTypeTree;
 
             // Cleared first: SetAssetFilter only unions into its set, so setting a second kind
@@ -361,7 +366,9 @@ namespace AssetStudioMobile
 
             // 1. Walk. One pass of readdir plus a stat per entry: linear, and parallelising it
             //    only adds contention on the same directory inode.
-            var everything = Directory.GetFiles(full, "*.*", SearchOption.AllDirectories);
+            var everything = File.Exists(full)
+                ? new[] { full }
+                : Directory.GetFiles(full, "*.*", SearchOption.AllDirectories);
             var walkMs = clock.ElapsedMilliseconds;
             clock.Restart();
 
@@ -504,14 +511,9 @@ namespace AssetStudioMobile
                     // A SerializedFile records the reader it came from, so the candidate is the one
                     // whose path is a prefix of it. A zip's entries carry the archive path plus the
                     // entry name, which is why this compares prefixes rather than equality.
-                    var fullPath = file.fullName ?? file.originalPath ?? file.fileName ?? string.Empty;
-                    var candidate = start;
-                    for (var i = 0; i < count; i++)
-                    {
-                        if (!fullPath.StartsWith(_candidates[start + i].Path, StringComparison.Ordinal)) continue;
-                        candidate = start + i;
-                        break;
-                    }
+                    var fullPath = SourcePath(file);
+                    var candidate = CandidateFor(fullPath);
+                    if (candidate < 0) candidate = start;   // nothing matched; still has to point somewhere
 
                     foreach (var o in file.Objects)
                     {
@@ -557,6 +559,11 @@ namespace AssetStudioMobile
 
             foreach (var file in _assetsManager.AssetsFileList)
             {
+                // The source is checked as well: a pathID is only unique inside one SerializedFile,
+                // and a candidate can be an archive holding dozens of them.
+                if (!string.IsNullOrEmpty(entry.Source)
+                    && !string.Equals(SourcePath(file), entry.Source, StringComparison.Ordinal)) continue;
+
                 foreach (var o in file.Objects)
                 {
                     if (o.m_PathID == entry.PathID && o.type == entry.Type) return o;
@@ -972,8 +979,15 @@ namespace AssetStudioMobile
 
             var claimed = new ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
 
-            foreach (var group in entries.GroupBy(e => e.Candidate))
+            // Reported, because a filtered export used to give no sign of life at all: no progress,
+            // no status, nothing until it finished, so it read as a dead button.
+            var groups = entries.GroupBy(e => e.Candidate).ToList();
+            var done = 0;
+
+            foreach (var group in groups)
             {
+                Report(++done, groups.Count);
+
                 // Keyed by source file as well: one candidate can be a zip holding dozens of
                 // serialized files, and a pathID is only unique inside one of them, so matching on
                 // pathID and type alone pulled in namesakes from its siblings.
@@ -989,9 +1003,10 @@ namespace AssetStudioMobile
                 {
                     foreach (var o in file.Objects)
                     {
-                        if (wanted.Contains((file.fullName, o.m_PathID, o.type))) targets.Add(o);
+                        if (wanted.Contains((SourcePath(file), o.m_PathID, o.type))) targets.Add(o);
                     }
                 }
+
 
                 Merge(report, WriteTargets(targets, outputRoot, options, false, claimed));
             }
@@ -1135,23 +1150,24 @@ namespace AssetStudioMobile
                 }
                 else
                 {
-                    var dest = Path.Combine(outputRoot, DisplayName(obj) + plan.Extension);
-
-                    // Two bundles can hold different assets with the same name and pathID, and one
-                    // file cannot hold both. The first claim wins: two workers writing the same path
-                    // would interleave into a corrupt file. An Addressables cache also keeps the same
-                    // asset in several bundles, so this is what stops it being encoded repeatedly.
-                    if (!claimed.TryAdd(dest, true))
+                    // Identity and destination are different questions, tracked separately in one
+                    // shared map under different prefixes.
+                    //
+                    // Identity is name plus pathID: an Addressables cache keeps one asset in many
+                    // bundles, and writing it once is the point.
+                    var identity = "id\u0000" + DisplayName(obj) + "\u0000" + obj.m_PathID;
+                    if (!claimed.TryAdd(identity, true))
                     {
                         report.Skipped++;
                         var skippedType = obj.type.ToString();
                         report.SkippedByType[skippedType] = Get(report.SkippedByType, skippedType) + 1;
 
                         if (report.Skipped <= 5)
-                            LogWarn($"跳过：{dest} 已被另一个对象占用");
+                            LogWarn($"跳过：{DisplayName(obj)}（pathID {obj.m_PathID}）已经在别的包里导出过了");
                     }
                     else
                     {
+                        var dest = ClaimPath(claimed, outputRoot, DisplayName(obj), plan.Extension);
                         if (plan.Extension == ".rawdata" && options.Mode != ExportKind.RawData) report.RawFallback++;
 
                         try
@@ -1570,25 +1586,101 @@ namespace AssetStudioMobile
         /// NamedObject.m_Name -- so it must not be used for file naming. The pathID suffix keeps
         /// names unique when several assets share a name (common across bundles/containers).
         /// </summary>
+        /// <summary>
+        /// What an asset is called: its own name and nothing else.
+        ///
+        /// A pathID used to be appended to every file, and the source bundle to every unnamed one,
+        /// which is unique and unreadable:
+        /// "unnamed_CAB-40a03710042fe83c0197cce4b4f1a7e9_-7528991862304389744.json". Uniqueness is
+        /// still needed -- a game holds several assets called "icon" and one directory cannot hold
+        /// both -- but it belongs in the path, and only where it is needed. See ClaimPath.
+        /// </summary>
         internal static string DisplayName(AssetStudio.Object obj)
-        {
-            var name = (obj as NamedObject)?.m_Name;
+            => SafeName((obj as NamedObject)?.m_Name);
 
-            // A pathID is only unique inside one SerializedFile, and an APK's Data folder holds
-            // dozens of .assets files that each number from 1. Everything without a name therefore
-            // collapsed onto paths like unnamed_1.json: 3370 objects out of 10706 in one test game
-            // were skipped as duplicates of each other, which is what "Auto does not export
-            // everything" turned out to be.
-            //
-            // Named assets keep the plain name_pathID. The source tag goes only where the name
-            // carries no information at all, so existing output names do not move.
-            if (string.IsNullOrEmpty(name))
+        /// <summary>
+        /// Which candidate holds a SerializedFile, or -1.
+        ///
+        /// LoadFilesAndFolders pulls in dependencies as well as the files it was handed, and a
+        /// dependency can live in another batch. Searching only the current batch is what made an
+        /// index entry name the wrong file: every object of a bundle that had been loaded as someone
+        /// else's dependency was filed under that someone else, so opening or exporting it then
+        /// searched the wrong file and found nothing. It cost two thirds of one filtered export
+        /// (612 of 4265) and every preview opened from an index.
+        /// </summary>
+        /// <summary>
+        /// The real path of the file a SerializedFile came from.
+        ///
+        /// Not fullName. For a file inside a bundle, fullName is the reader's path on the
+        /// *decompressed* stream, which is the bundle's internal name -- "CAB-40a03710042fe83c0197cce4b4f1a7e9"
+        /// -- and it is not a path at all, nor is it unique: every bundle from one build can carry
+        /// the same internal name. originalPath is the path the bundle was opened from, which is
+        /// what the scan's candidates are keyed by and what makes an index entry findable again.
+        ///
+        /// Preferring fullName is what made every index entry name a file that does not exist: the
+        /// entry could not be traced back to its bundle, so opening one reported "the object is not
+        /// in this file" and a filtered export matched 368 of 1905 objects.
+        /// </summary>
+        private static string SourcePath(SerializedFile file)
+            => file?.originalPath ?? file?.fullName ?? file?.fileName ?? string.Empty;
+
+        private int CandidateFor(string source)
+        {
+            if (_candidates == null || string.IsNullOrEmpty(source)) return -1;
+
+            // The common case is an exact hit: a plain bundle's reader path is the candidate's path.
+            _candidateByPath ??= BuildCandidateIndex();
+            if (_candidateByPath.TryGetValue(source, out var direct)) return direct;
+
+            // Otherwise it is something inside a container -- a zip's entry path is the archive's
+            // path plus the entry name -- so the longest candidate path that is a prefix wins.
+            var best = -1;
+            var bestLength = -1;
+            foreach (var pair in _candidateByPath)
             {
-                var source = SourceTag(obj);
-                return source == null ? $"unnamed_{obj.m_PathID}" : $"unnamed_{source}_{obj.m_PathID}";
+                if (pair.Key.Length <= bestLength) continue;
+                if (!source.StartsWith(pair.Key, StringComparison.Ordinal)) continue;
+
+                best = pair.Value;
+                bestLength = pair.Key.Length;
+            }
+            return best;
+        }
+
+        private Dictionary<string, int> _candidateByPath;
+
+        private Dictionary<string, int> BuildCandidateIndex()
+        {
+            var map = new Dictionary<string, int>(_candidates.Count, StringComparer.Ordinal);
+            for (var i = 0; i < _candidates.Count; i++) map[_candidates[i].Path] = i;
+            return map;
+        }
+
+        /// <summary>
+        /// The first free name for an asset: "icon.png", then "icon (2).png", and so on.
+        ///
+        /// A name is not unique and one directory cannot hold two files of it, so collisions still
+        /// have to be separated -- but a counter says so in a few characters and only where it is
+        /// needed, unlike the pathID this replaced.
+        ///
+        /// The extension is not added when the name already ends with it, so a TextAsset called
+        /// "setting_config.json" is written as setting_config.json rather than setting_config.json.txt.
+        /// </summary>
+        private static string ClaimPath(ConcurrentDictionary<string, bool> claimed, string root,
+                                        string stem, string extension)
+        {
+            if (stem.EndsWith(extension, StringComparison.OrdinalIgnoreCase)) extension = string.Empty;
+
+            var candidate = Path.Combine(root, stem + extension);
+            if (claimed.TryAdd("path\u0000" + candidate, true)) return candidate;
+
+            for (var i = 2; i < 100000; i++)
+            {
+                candidate = Path.Combine(root, $"{stem} ({i}){extension}");
+                if (claimed.TryAdd("path\u0000" + candidate, true)) return candidate;
             }
 
-            return $"{SafeName(name)}_{obj.m_PathID}";
+            return Path.Combine(root, stem + extension);
         }
 
         /// <summary>The file an object came from, as a short name to disambiguate by.</summary>
@@ -1631,6 +1723,7 @@ namespace AssetStudioMobile
         public void Clear()
         {
             _indexedCandidate = -1;
+            _candidateByPath = null;
             _assetsManager.Clear();
             _candidates = null;
             _released = false;

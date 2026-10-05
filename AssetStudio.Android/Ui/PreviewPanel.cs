@@ -99,6 +99,7 @@ namespace AssetStudioMobile.Ui
         private readonly List<Row> _items = new List<Row>();
         private readonly Button _filterButton;
         private readonly Button _exportFiltered;
+        private readonly Button _exportAll;
         private readonly ProgressBar _progress;
         private readonly EditText _search;
         private int _batch;
@@ -116,9 +117,22 @@ namespace AssetStudioMobile.Ui
         private readonly Android.OS.Handler _ticker = new Android.OS.Handler(Android.OS.Looper.MainLooper);
         private readonly Java.Lang.Runnable _tick;
 
-        public PreviewPanel(Context context, int batchCount, Action<Action> background, Action<Action> ui)
+        /// <summary>
+        /// <paramref name="categories"/> is the selection the app is already using, which this panel
+        /// has to start from.
+        ///
+        /// It used to start empty -- showing 全部 -- while the app kept the previous selection, and
+        /// the two then disagreed: the screen said 全部 and 导出全部 exported the last category that
+        /// had been picked, which is exactly what "I clicked 导出全部 and it exported audio" was.
+        /// </summary>
+        public PreviewPanel(Context context, int batchCount, Action<Action> background, Action<Action> ui,
+                            IReadOnlyCollection<ExportKind> categories = null)
         {
             _context = context;
+            if (categories != null)
+            {
+                foreach (var kind in categories) _selected.Add(kind);
+            }
             _batchCount = Math.Max(1, batchCount);
             _tick = new Java.Lang.Runnable(TickAudio);
             _background = background ?? (work => work());
@@ -130,7 +144,7 @@ namespace AssetStudioMobile.Ui
             _previous = UiKit.Button(context, "◀ 上一批", () => BatchRequested?.Invoke(_batch - 1));
             _next = UiKit.Button(context, "下一批 ▶", () => BatchRequested?.Invoke(_batch + 1));
             var close = UiKit.Button(context, "返回导出", () => Closed?.Invoke());
-            var exportAll = UiKit.Button(context, "导出全部", () => ExportAllRequested?.Invoke());
+            _exportAll = UiKit.Button(context, "导出全部", () => ExportAllRequested?.Invoke());
 
             // Disabled rather than hidden when nothing is indexed: a missing button reads as a
             // feature that does not exist, a greyed one reads as "select something first".
@@ -176,7 +190,7 @@ namespace AssetStudioMobile.Ui
 
             Root = UiKit.Column(context,
                 UiKit.Field(context, "浏览 · 一批一次加载，避免整棵资源树占用内存", _title),
-                UiKit.Row(context, close, exportAll, _exportFiltered),
+                UiKit.Row(context, close, _exportAll, _exportFiltered),
                 _progress,
                 UiKit.Row(context, _previous, _next, _filterButton),
                 _search,
@@ -254,8 +268,7 @@ namespace AssetStudioMobile.Ui
         private static string DescribeIndexed(Extractor.IndexEntry entry)
         {
             var name = string.IsNullOrEmpty(entry.Name) ? $"pathID {entry.PathID}" : entry.Name;
-            var source = ShortSource(entry.Source);
-            return source == null ? $"{entry.Type}  ·  {name}" : $"{entry.Type}  ·  {name}   [{source}]";
+            return $"{entry.Type}  ·  {name}";
         }
 
         private void ApplySelection()
@@ -348,6 +361,13 @@ namespace AssetStudioMobile.Ui
             _filterButton.Text = "筛选: " + SelectionLabel();
             SelectionChanged?.Invoke(new List<ExportKind>(_selected));
 
+            // The previous index describes a different selection, so it stops being exportable the
+            // moment the selection changes. It used to stay live until the new one arrived, and
+            // tapping 导出筛选 in that window exported the old selection -- "whatever I filter, it
+            // exports textures" was that window.
+            _indexEntries = Array.Empty<Extractor.IndexEntry>();
+            _exportFiltered.Enabled = false;
+
             if (_selected.Count == 0)
             {
                 // Nothing to narrow, so the batch view is the right one again -- and an index of the
@@ -368,6 +388,19 @@ namespace AssetStudioMobile.Ui
         /// export screen, which is no longer where exports are started from -- so it was invisible
         /// exactly when it was needed.
         /// </summary>
+        /// <summary>
+        /// Locks the export buttons for the duration.
+        ///
+        /// Several taps used to start several exports at once, all sharing one Extractor and its
+        /// AssetsManager, which is not a thing that can work -- and it is also why repeated taps on
+        /// 导出筛选 appeared to do nothing.
+        /// </summary>
+        public void SetExporting(bool busy) => _ui(() =>
+        {
+            _exportAll.Enabled = !busy;
+            _exportFiltered.Enabled = !busy && _indexEntries.Count > 0;
+        });
+
         public void SetProgress(int current, int total)
         {
             _ui(() =>
@@ -404,8 +437,10 @@ namespace AssetStudioMobile.Ui
             var name = (o as NamedObject)?.m_Name;
             if (string.IsNullOrEmpty(name)) name = $"pathID {o.m_PathID}";
 
-            var source = SourceOf(o);
-            return source == null ? $"{o.type}  ·  {name}" : $"{o.type}  ·  {name}   [{source}]";
+            // The source is not in the row. It filled a second line with the same 32-character
+            // bundle name on every row of an index, which is noise when it is identical and still
+            // noise when it is not; it belongs on the page for the one object being looked at.
+            return $"{o.type}  ·  {name}";
         }
 
         /// <summary>
@@ -467,7 +502,11 @@ namespace AssetStudioMobile.Ui
         }
 
         private View Page(Object shown, View content)
-            => Page(Describe(shown), content, () => ExportRequested?.Invoke(shown));
+        {
+            var source = SourceOf(shown);
+            var title = source == null ? Describe(shown) : $"{Describe(shown)}   [{source}]";
+            return Page(title, content, () => ExportRequested?.Invoke(shown));
+        }
 
         private View Page(string title, View content, Action export = null)
         {

@@ -37,6 +37,9 @@ namespace AssetStudioMobile
         /// <summary>And one index at a time, for the same reason.</summary>
         private bool _indexing;
 
+        /// <summary>And one export at a time: they share the extractor and its manager.</summary>
+        private bool _exporting;
+
         /// <summary>
         /// The categories in play, empty meaning everything.
         ///
@@ -266,7 +269,7 @@ namespace AssetStudioMobile
                         // Each `am start` is a fresh process, so an export launched this way has
                         // no loaded assets unless we scan first.
                         if (_extractor == null) Scan();
-                        Export(true);
+                        Export(_categories.ToArray(), SelectionTag());
                     });
                     break;
                 }
@@ -348,10 +351,24 @@ namespace AssetStudioMobile
             }
             try { full = Path.GetFullPath(full); } catch { /* keep the raw text for the error */ }
 
-            var problem = StorageAccess.ValidateReadableDirectory(full);
-            if (problem == null) return full;
+            // A file that can be opened is read where it is. This used to insist on a directory, so
+            // a single picked or typed file went off to be staged through Shizuku -- a copy of the
+            // whole thing into our own storage -- even when it sat in /sdcard/Download and needed
+            // no permission at all.
+            if (File.Exists(full))
+            {
+                if (CanRead(full)) return full;
 
-            Append($"{full}: {problem}");
+                Append($"{full}: 读不到这个文件");
+            }
+            else
+            {
+                var problem = StorageAccess.ValidateReadableDirectory(full);
+                if (problem == null) return full;
+
+                Append($"{full}: {problem}");
+            }
+
             Append("「所有文件访问」覆盖不到 /sdcard/Android/data，改用 Shizuku…");
 
             if (ShizukuBridge.State != ShizukuState.Ready)
@@ -588,17 +605,40 @@ namespace AssetStudioMobile
             });
         }
 
+        /// <summary>True when the file can actually be opened, not merely named.</summary>
+        private static bool CanRead(string path)
+        {
+            try { using var probe = File.OpenRead(path); return true; }
+            catch { return false; }
+        }
+
         private void ImportPickedFile(Android.Net.Uri uri)
         {
             RunOnBackground(() =>
             {
+                // A picked file that resolves to a real path is read where it is. The picker hands
+                // back a document URI and, for external storage, that maps to a path this app can
+                // open directly when it holds all-files access -- so copying a 500 MB APK into our
+                // own directory to read it once was happening for files that needed no permission.
+                var real = SafPaths.ToFileSystemPath(uri);
+                if (!string.IsNullOrEmpty(real) && File.Exists(real) && CanRead(real))
+                {
+                    Append($"直接使用 {real}（不复制）");
+                    _inputDir = real;
+                    RunOnUiThread(() => _panel.InputPath.Text = real);
+                    Scan();
+                    return;
+                }
+
+                // Falls back to staging: a cloud provider, or a URI with no file behind it.
                 var external = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
                 var dir = ApkImport.StagePickedFile(this, uri, external, Append);
                 if (dir == null)
                 {
-                    SetStatus("cannot read the picked APK");
+                    SetStatus("读不了所选文件");
                     return;
                 }
+
                 _inputDir = dir;
                 RunOnUiThread(() => _panel.InputPath.Text = dir);
                 Scan();
@@ -698,11 +738,16 @@ namespace AssetStudioMobile
 
         // ---------------- work ----------------
 
-        private void Scan()
+        private void Scan() => Scan(_categories);
+
+        private void Scan(IReadOnlyCollection<ExportKind> categories)
         {
-            var files = Directory.Exists(_inputDir)
-                ? Directory.GetFiles(_inputDir, "*.*", SearchOption.AllDirectories).Length
-                : 0;
+            // A single picked file is a valid input, not just a folder: reading it where it lies is
+            // the whole point of not copying it first.
+            var files = File.Exists(_inputDir) ? 1
+                : Directory.Exists(_inputDir)
+                    ? Directory.GetFiles(_inputDir, "*.*", SearchOption.AllDirectories).Length
+                    : 0;
             if (files == 0)
             {
                 SetStatus("输入文件夹里没有文件");
@@ -722,7 +767,7 @@ namespace AssetStudioMobile
 
             // The categories decide which object types are worth building; see Extractor.FiltersFor.
             ApplyDecryptor(_extractor);
-            _extractor.Load(_inputDir, _categories);
+            _extractor.Load(_inputDir, categories);
 
             // A tree too big to hold is not read until Export asks for it, so there are no object
             // counts to show yet, only what the scan recognised.
@@ -733,7 +778,15 @@ namespace AssetStudioMobile
                     : $"{_extractor.CandidateCount} candidate file(s) -- will be read on export");
         }
 
-        private void Export(bool overwrite)
+        /// <summary>
+        /// Exports a set of categories.
+        ///
+        /// 导出全部 passes no categories, so it means the whole tree. It used to pass whatever the
+        /// filter held, and the screen could say 全部 while the app still held 音频 from an earlier
+        /// session -- pressing 导出全部 then produced audio and nothing else, which is what one
+        /// report of "it always exports the first thing I filtered" turned out to be.
+        /// </summary>
+        private void Export(IReadOnlyCollection<ExportKind> categories, string label)
         {
             if (_extractor == null)
             {
@@ -742,55 +795,102 @@ namespace AssetStudioMobile
                 return;
             }
 
-            // The load was narrowed to whatever categories were selected when it ran, so exporting a
-            // different set has to go back through the loader -- the manager's filter cannot be
-            // widened once set.
-            if (!SameCategories(_extractor.LoadedCategories, _categories))
+            if (_exporting)
             {
-                Append($"类别改为 {SelectionTag()}，重新加载");
-                Scan();
-                if (_extractor == null) return;
+                Append("已经在导出了，等它结束再点。");
+                return;
             }
 
-            var options = new ExportOptions
+            _exporting = true;
+            RunOnUiThread(() => _browser?.SetExporting(true));
+            try
             {
-                Mode = _mode,
-                Categories = _categories.ToArray(),
-                Overwrite = overwrite,
-            };
+                // The load was narrowed to whatever was selected when it ran, so exporting a
+                // different set has to go back through the loader -- the filter cannot be widened
+                // once set.
+                if (!SameCategories(_extractor.LoadedCategories, categories))
+                {
+                    Append($"加载类别改为 {label}，重新加载");
+                    Scan(categories);
+                    if (_extractor == null) return;
+                }
 
-            var dest = OutputDirectory();
-            Append($"正在导出 {SelectionTag()} → {dest}");
+                var options = new ExportOptions
+                {
+                    Mode = _mode,
+                    Categories = categories,
+                    Overwrite = true,
+                };
 
-            var report = _extractor.Export(dest, options);
-            Append(report.ToString());
-            foreach (var e in report.Errors.Take(20)) Append("  " + e);
-            RunOnUiThread(() => _browser?.ClearProgress());
-            SetStatus($"已导出 {report.Exported}/{report.Matched} → {Path.GetFileName(dest)}");
+                var dest = OutputDirectory(label);
+                Append($"正在导出 {label} → {dest}");
+
+                var report = _extractor.Export(dest, options);
+                Append(report.ToString());
+                foreach (var e in report.Errors.Take(20)) Append("  " + e);
+                SetStatus($"已导出 {report.Exported}/{report.Matched} → {Path.GetFileName(dest)}");
+            }
+            finally
+            {
+                _exporting = false;
+                RunOnUiThread(() =>
+                {
+                    _browser?.ClearProgress();
+                    _browser?.SetExporting(false);
+                });
+            }
         }
 
         /// <summary>Writes the objects the browser's index selected, loading each file once.</summary>
-        private void ExportFiltered(IReadOnlyList<Extractor.IndexEntry> entries, bool overwrite)
+        private void ExportFiltered(IReadOnlyList<Extractor.IndexEntry> entries)
         {
             if (_extractor == null || entries == null || entries.Count == 0) return;
 
-            var options = new ExportOptions { Mode = _mode, Overwrite = overwrite };
-            var dest = OutputDirectory();
+            if (_exporting)
+            {
+                Append("已经在导出了，等它结束再点。");
+                return;
+            }
 
-            Append($"正在导出筛选出的 {entries.Count} 个对象 → {dest}");
-            var report = _extractor.ExportIndexed(entries, dest, options);
-            Append(report.ToString());
-            foreach (var e in report.Errors.Take(20)) Append("  " + e);
-            RunOnUiThread(() => _browser?.ClearProgress());
-            SetStatus($"已导出 {report.Exported}/{report.Matched} → {Path.GetFileName(dest)}");
+            _exporting = true;
+            RunOnUiThread(() => _browser?.SetExporting(true));
+            try
+            {
+                // No categories: the entries are the selection, and filtering them a second time
+                // could only lose some of what was already chosen.
+                var options = new ExportOptions { Mode = _mode, Overwrite = true };
+                var dest = OutputDirectory($"筛选{entries.Count}");
+
+                Append($"正在导出筛选出的 {entries.Count} 个对象 → {dest}");
+                var report = _extractor.ExportIndexed(entries, dest, options);
+                Append(report.ToString());
+                foreach (var e in report.Errors.Take(20)) Append("  " + e);
+                SetStatus($"已导出 {report.Exported}/{report.Matched} → {Path.GetFileName(dest)}");
+            }
+            finally
+            {
+                _exporting = false;
+                RunOnUiThread(() =>
+                {
+                    _browser?.ClearProgress();
+                    _browser?.SetExporting(false);
+                });
+            }
         }
 
-        private string OutputDirectory()
+        private string OutputDirectory(string label)
         {
             var baseDir = string.IsNullOrWhiteSpace(_panel.OutputPath?.Text)
                 ? _outputDir
                 : _panel.OutputPath.Text.Trim();
-            return Path.Combine(baseDir, $"{SelectionTag()}_{DateTime.Now:yyyyMMdd_HHmmss}");
+            return Path.Combine(baseDir, $"{_mode}_{Sanitize(label)}_{DateTime.Now:yyyyMMdd_HHmmss}");
+        }
+
+        private static string Sanitize(string label)
+        {
+            var sb = new System.Text.StringBuilder(label.Length);
+            foreach (var c in label) sb.Append(char.IsLetterOrDigit(c) || c == '-' || c == '+' ? c : '_');
+            return sb.ToString();
         }
 
         /// <summary>A short, file-name-safe tag for what is selected, for the output directory.</summary>
@@ -803,7 +903,8 @@ namespace AssetStudioMobile
             return $"{_mode}_{string.Join("-", names)}";
         }
 
-        private static bool SameCategories(IReadOnlyCollection<ExportKind> loaded, ICollection<ExportKind> selected)
+        private static bool SameCategories(IReadOnlyCollection<ExportKind> loaded,
+                                            IReadOnlyCollection<ExportKind> selected)
         {
             var left = loaded ?? Array.Empty<ExportKind>();
             return left.Count == selected.Count && left.All(selected.Contains);
@@ -838,7 +939,7 @@ namespace AssetStudioMobile
                 return;
             }
 
-            _browser = new PreviewPanel(this, _extractor.BatchCount, RunOnBackground, RunOnUiThread);
+            _browser = new PreviewPanel(this, _extractor.BatchCount, RunOnBackground, RunOnUiThread, _categories);
             _browser.Closed += () =>
             {
                 // The player holds a decoder on the clip that is open; leaving it running would keep
@@ -851,9 +952,9 @@ namespace AssetStudioMobile
             _browser.ExportRequested += target => RunOnBackground(() => ExportSingle(target));
             _browser.IndexRequested += kinds => RunOnBackground(() => BuildIndex(kinds));
             _browser.IndexedRequested += entry => RunOnBackground(() => ShowIndexed(entry));
-            _browser.ExportAllRequested += () => RunOnBackground(() => Export(true));
-            _browser.ExportFilteredRequested += entries =>
-                RunOnBackground(() => ExportFiltered(entries, true));
+            // 导出全部 means the whole tree, so it passes no categories at all -- see Export.
+            _browser.ExportAllRequested += () => RunOnBackground(() => Export(Array.Empty<ExportKind>(), "全部"));
+            _browser.ExportFilteredRequested += entries => RunOnBackground(() => ExportFiltered(entries));
             _browser.SelectionChanged += kinds =>
             {
                 _categories.Clear();
