@@ -959,7 +959,8 @@ namespace AssetStudioMobile
 
             var report = new ExportReport();
             var claimed = new ConcurrentDictionary<string, bool>(StringComparer.Ordinal);
-            Merge(report, WriteTargets(new List<AssetStudio.Object> { target }, outputRoot, options, false, claimed));
+            Merge(report, WriteTargets(new List<AssetStudio.Object> { target }, outputRoot, options, false,
+                                       claimed, _assetsManager));
             Finish(report);
             return report;
         }
@@ -1008,7 +1009,7 @@ namespace AssetStudioMobile
                 }
 
 
-                Merge(report, WriteTargets(targets, outputRoot, options, false, claimed));
+                Merge(report, WriteTargets(targets, outputRoot, options, false, claimed, _assetsManager));
             }
 
             Finish(report);
@@ -1028,7 +1029,7 @@ namespace AssetStudioMobile
                 // read again. Per-asset progress, because the asset count is the whole job.
                 var targets = CollectTargets(_assetsManager, options);
                 Report(0, targets.Count);
-                Merge(report, WriteTargets(targets, outputRoot, options, true, claimed));
+                Merge(report, WriteTargets(targets, outputRoot, options, true, claimed, _assetsManager));
                 Finish(report);
                 return report;
             }
@@ -1058,7 +1059,7 @@ namespace AssetStudioMobile
                     Interlocked.Add(ref _loadedFiles, f);
                     Interlocked.Add(ref _loadedObjects, o);
                     var targets = CollectTargets(worker.Manager, options);
-                    var fragment = WriteTargets(targets, outputRoot, options, false, claimed);
+                    var fragment = WriteTargets(targets, outputRoot, options, false, claimed, worker.Manager);
                     lock (report) Merge(report, fragment);
                     worker.Manager.Clear();
                     Report(Interlocked.Add(ref done, batch.Count), list.Count);
@@ -1119,7 +1120,8 @@ namespace AssetStudioMobile
         /// </summary>
         private ExportReport WriteTargets(List<AssetStudio.Object> targets, string outputRoot,
                                           ExportOptions options, bool perAssetProgress,
-                                          ConcurrentDictionary<string, bool> claimed)
+                                          ConcurrentDictionary<string, bool> claimed,
+                                          AssetsManager manager)
         {
             var report = new ExportReport { Matched = targets.Count };
 
@@ -1128,13 +1130,18 @@ namespace AssetStudioMobile
                 report.ByType[g.Key] = Get(report.ByType, g.Key) + g.Count();
             }
 
+            // Built once for whatever this manager has loaded. The container list is per file and
+            // the assets it names have to be resolved through it, so it is read here rather than
+            // once per asset.
+            var containers = ContainersIn(manager);
+
             var done = 0;
             foreach (var obj in targets)
             {
                 ExportPlan plan;
                 try
                 {
-                    plan = Plan(obj, options);
+                    plan = Plan(obj, options, containers);
                 }
                 catch (Exception ex)
                 {
@@ -1296,7 +1303,8 @@ namespace AssetStudioMobile
         /// point of ExportKind.Auto: nothing is dropped just because no checkbox covered it, every
         /// type either has a real exporter here or falls back to a JSON dump.
         /// </summary>
-        private static ExportPlan Plan(AssetStudio.Object o, ExportOptions options)
+        private static ExportPlan Plan(AssetStudio.Object o, ExportOptions options,
+                                       IReadOnlyDictionary<AssetStudio.Object, string> containers = null)
         {
             switch (o)
             {
@@ -1384,7 +1392,7 @@ namespace AssetStudioMobile
                 case TextAsset ta:
                     return new ExportPlan
                     {
-                        Extension = TextAssetExtension(ta),
+                        Extension = TextAssetExtension(ta, containers),
                         Write = (obj, dest, opt) => File.WriteAllBytes(dest, ((TextAsset)obj).m_Script),
                     };
 
@@ -1657,6 +1665,65 @@ namespace AssetStudioMobile
         }
 
         /// <summary>
+        /// The path each asset is published under, from the AssetBundle's own container list.
+        ///
+        /// This is where a Live2D model's extensions actually live. Its parts are named "model",
+        /// "physics", "motion" with no extension at all, and the bundle records that they are
+        /// published as "assets/live2d/xxx/model.moc3", ".../xxx.physics3.json" and so on. The
+        /// desktop reads the extension from there; without it those files can only come out as
+        /// ".txt", which is what they were doing.
+        ///
+        /// The mapping is per file, exactly as the desktop builds it: a PreloadData object supplies
+        /// the table, and each container entry names a slice of it.
+        /// </summary>
+        private static Dictionary<AssetStudio.Object, string> ContainersIn(AssetsManager manager)
+        {
+            var map = new Dictionary<AssetStudio.Object, string>();
+
+            foreach (var file in manager.AssetsFileList)
+            {
+                var preloadTable = new List<PPtr<AssetStudio.Object>>();
+
+                foreach (var asset in file.Objects)
+                {
+                    switch (asset)
+                    {
+                        case PreloadData preload:
+                            preloadTable = preload.m_Assets;
+                            break;
+
+                        case AssetBundle bundle:
+                            var streamed = bundle.m_IsStreamedSceneAssetBundle;
+                            if (!streamed) preloadTable = bundle.m_PreloadTable;
+
+                            foreach (var entry in bundle.m_Container)
+                            {
+                                var size = streamed ? preloadTable.Count : entry.Value.preloadSize;
+                                var end = entry.Value.preloadIndex + size;
+
+                                for (var k = entry.Value.preloadIndex; k < end && k < preloadTable.Count; k++)
+                                {
+                                    if (preloadTable[k].TryGet(out var target) && target != null)
+                                        map[target] = entry.Key;
+                                }
+                            }
+                            break;
+
+                        case ResourceManager resources:
+                            foreach (var entry in resources.m_Container)
+                            {
+                                if (entry.Value.TryGet(out var target) && target != null)
+                                    map[target] = entry.Key;
+                            }
+                            break;
+                    }
+                }
+            }
+
+            return map;
+        }
+
+        /// <summary>
         /// What extension a TextAsset is written with.
         ///
         /// A TextAsset's name is often its real file name with its real extension already on it. A
@@ -1671,10 +1738,22 @@ namespace AssetStudioMobile
         /// ".unity3d" on a TextAsset that is nothing of the sort. ".txt" is honest until the real
         /// container path is available.
         /// </summary>
-        private static string TextAssetExtension(TextAsset asset)
+        private static string TextAssetExtension(TextAsset asset,
+                                                 IReadOnlyDictionary<AssetStudio.Object, string> containers)
         {
             var name = asset?.m_Name;
-            return !string.IsNullOrEmpty(name) && Path.HasExtension(name) ? string.Empty : ".txt";
+            if (!string.IsNullOrEmpty(name) && Path.HasExtension(name)) return string.Empty;
+
+            // The container path next, as the desktop does: it carries the extension the asset is
+            // actually published with even when the asset's own name does not.
+            if (containers != null && asset != null && containers.TryGetValue(asset, out var container)
+                && !string.IsNullOrEmpty(container))
+            {
+                var fromContainer = Path.GetExtension(container);
+                if (!string.IsNullOrEmpty(fromContainer)) return fromContainer;
+            }
+
+            return ".txt";
         }
 
         /// <summary>
