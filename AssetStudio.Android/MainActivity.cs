@@ -878,12 +878,21 @@ namespace AssetStudioMobile
             }
         }
 
+        /// <summary>
+        /// The output directory for one export.
+        ///
+        /// <paramref name="label"/> already names what is being written, so the mode is only added
+        /// when it is not in there already -- "Auto" used to end up in front of it twice, on
+        /// directories named Auto_Auto_TextAsset_....
+        /// </summary>
         private string OutputDirectory(string label)
         {
             var baseDir = string.IsNullOrWhiteSpace(_panel.OutputPath?.Text)
                 ? _outputDir
                 : _panel.OutputPath.Text.Trim();
-            return Path.Combine(baseDir, $"{_mode}_{Sanitize(label)}_{DateTime.Now:yyyyMMdd_HHmmss}");
+
+            var name = label.StartsWith(_mode.ToString(), StringComparison.Ordinal) ? label : $"{_mode}_{label}";
+            return Path.Combine(baseDir, $"{Sanitize(name)}_{DateTime.Now:yyyyMMdd_HHmmss}");
         }
 
         private static string Sanitize(string label)

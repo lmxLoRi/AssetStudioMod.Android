@@ -1384,7 +1384,7 @@ namespace AssetStudioMobile
                 case TextAsset ta:
                     return new ExportPlan
                     {
-                        Extension = ".txt",
+                        Extension = TextAssetExtension(ta),
                         Write = (obj, dest, opt) => File.WriteAllBytes(dest, ((TextAsset)obj).m_Script),
                     };
 
@@ -1654,6 +1654,27 @@ namespace AssetStudioMobile
             var map = new Dictionary<string, int>(_candidates.Count, StringComparer.Ordinal);
             for (var i = 0; i < _candidates.Count; i++) map[_candidates[i].Path] = i;
             return map;
+        }
+
+        /// <summary>
+        /// What extension a TextAsset is written with.
+        ///
+        /// A TextAsset's name is often its real file name with its real extension already on it. A
+        /// Live2D model is a set of them -- "model.model3.json", "model.physics3.json",
+        /// "model.motion3.json" -- and appending ".txt" turns a model into "model.model3.json.txt",
+        /// which nothing will open. The desktop keeps the name's extension for the same reason.
+        ///
+        /// The desktop then falls back to the extension of the asset's *container* path -- the path
+        /// the bundle publishes the asset under, like "assets/live2d/model.moc3" -- and only then to
+        /// ".txt". That is not replicated here: the container path has to be resolved through the
+        /// bundle's preload table, and the near substitute (the bundle's own file name) produces
+        /// ".unity3d" on a TextAsset that is nothing of the sort. ".txt" is honest until the real
+        /// container path is available.
+        /// </summary>
+        private static string TextAssetExtension(TextAsset asset)
+        {
+            var name = asset?.m_Name;
+            return !string.IsNullOrEmpty(name) && Path.HasExtension(name) ? string.Empty : ".txt";
         }
 
         /// <summary>
