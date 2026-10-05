@@ -1572,12 +1572,19 @@ namespace AssetStudioMobile
         }
 
         /// <summary>
-        /// Formats with no alpha channel, so every pixel is opaque and the PNG can be written as RGB
-        /// -- a quarter less data into the deflate, and measurably more than a quarter faster.
+        /// Formats that really have no alpha channel, so every pixel is opaque and the PNG can be
+        /// written as RGB -- a quarter less data into the deflate, and measurably more than a
+        /// quarter faster.
         ///
-        /// Deliberately conservative: naming a format here that does have alpha would silently drop
-        /// it, so anything ambiguous is left out and falls back to scanning the pixels instead. DXT1
-        /// is the obvious one, since it can carry 1-bit alpha.
+        /// ASTC is deliberately not here. Its blocks are 128 bits whatever Unity calls them, and
+        /// "ASTC_RGB_6x6" is a compression setting rather than a promise that the data has no alpha:
+        /// listed as opaque, it forced an RGB PNG over a Spine atlas page whose transparency was
+        /// real, and the model came out shredded -- against the desktop, whose encoder always writes
+        /// RGBA. The pixel scan decides for ASTC, and it is exact: if no alpha byte is anything but
+        /// opaque, RGB loses nothing.
+        ///
+        /// The remaining entries name formats with no alpha plane at all, where the decoded alpha is
+        /// filler rather than data.
         /// </summary>
         private static bool FormatHasNoAlpha(TextureFormat format) => format switch
         {
@@ -1587,12 +1594,6 @@ namespace AssetStudioMobile
             TextureFormat.ETC_RGB4_3DS => true,
             TextureFormat.ETC_RGB4Crunched => true,
             TextureFormat.ETC2_RGB => true,
-            TextureFormat.ASTC_RGB_4x4 => true,
-            TextureFormat.ASTC_RGB_5x5 => true,
-            TextureFormat.ASTC_RGB_6x6 => true,
-            TextureFormat.ASTC_RGB_8x8 => true,
-            TextureFormat.ASTC_RGB_10x10 => true,
-            TextureFormat.ASTC_RGB_12x12 => true,
             _ => false,
         };
 
