@@ -124,32 +124,52 @@ namespace AssetStudioMobile
             return names;
         }
 
-        /// <summary>Groups the assets by the model their names say they belong to.</summary>
+        /// <summary>
+        /// Groups the assets by the model their names say they belong to.
+        ///
+        /// Two passes, and the order is the whole point. A model is created by its atlas -- or its
+        /// "_ske"/"_tex" pair -- and a skeleton can only be attached to a model that already exists.
+        /// One pass therefore lost every skeleton that came before its atlas in the file order:
+        /// 8 of 28 models had a skeleton and 20 had none, and which was which depended on nothing
+        /// but where the assets happened to sit in the bundles.
+        /// </summary>
         private static Dictionary<string, Model> Find(AssetsManager manager,
                                                       IReadOnlyDictionary<Object, string> containers)
         {
             var models = new Dictionary<string, Model>(StringComparer.Ordinal);
-            var skeletons = new List<(string Base, TextAsset Asset)>();
+            var textAssets = new List<TextAsset>();
 
             foreach (var file in manager.AssetsFileList)
             {
                 foreach (var obj in file.Objects)
                 {
-                    if (!(obj is TextAsset asset) || string.IsNullOrEmpty(asset.m_Name)) continue;
+                    if (obj is TextAsset asset && !string.IsNullOrEmpty(asset.m_Name)) textAssets.Add(asset);
+                }
+            }
 
-                    // The first name that matches a known shape decides what the asset is.
-                    foreach (var candidate in LogicalNames(asset, containers))
-                    {
-                        if (Classify(candidate, asset, models)) break;
-                    }
+            // Pass one: what defines a model.
+            foreach (var asset in textAssets)
+            {
+                foreach (var candidate in LogicalNames(asset, containers))
+                {
+                    if (Anchor(candidate, asset, models)) break;
+                }
+            }
+
+            // Pass two: what belongs to one.
+            foreach (var asset in textAssets)
+            {
+                foreach (var candidate in LogicalNames(asset, containers))
+                {
+                    if (Attach(candidate, asset, models)) break;
                 }
             }
 
             return models;
         }
 
-        /// <summary>Sorts one asset into a model, and says whether its name was recognised.</summary>
-        private static bool Classify(string name, TextAsset asset, Dictionary<string, Model> models)
+        /// <summary>Creates a model from the asset that defines it.</summary>
+        private static bool Anchor(string name, TextAsset asset, Dictionary<string, Model> models)
         {
             Model ModelFor(string baseName, bool dragonBones)
             {
@@ -194,23 +214,28 @@ namespace AssetStudioMobile
                 return true;
             }
 
-            // A plain ".json" is a skeleton only if an atlas already claimed that base name.
+            return false;
+        }
+
+        /// <summary>Attaches an asset to the model that already exists for it.</summary>
+        private static bool Attach(string name, TextAsset asset, Dictionary<string, Model> models)
+        {
+            // A plain ".json" is a skeleton for the model of that name, if an atlas made one.
             if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
             {
                 var stem = name.Substring(0, name.Length - ".json".Length);
-                if (!models.TryGetValue(stem, out var model)) return false;
+                if (!models.TryGetValue(stem, out var model) || model.Skeleton != null) return false;
 
                 model.Skeleton = asset;
                 model.SkeletonName = name;
                 return true;
             }
 
-            // A Spine skeleton is often named with no extension in either place: m_Name is
-            // "M095_Spine" and the container is ".../M095_Spine.asset", while the content is the
-            // skeleton JSON. A model whose base name it matches is what it belongs to.
-            var bare = Path.GetFileNameWithoutExtension(name);
-            if (!string.IsNullOrEmpty(bare) && models.TryGetValue(bare, out var owner)
-                && owner.Skeleton == null)
+            // A spine-unity skeleton is often named with no extension anywhere: m_Name is
+            // "M098_Spine" and the container is ".../M098_Spine_SkeletonData.asset", while the
+            // content is the skeleton. Its own base name is the model it belongs to.
+            var bare = name;
+            if (models.TryGetValue(bare, out var owner) && owner.Skeleton == null)
             {
                 owner.Skeleton = asset;
                 owner.SkeletonName = bare + ".json";
