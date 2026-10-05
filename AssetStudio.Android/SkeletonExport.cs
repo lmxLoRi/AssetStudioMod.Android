@@ -76,6 +76,8 @@ namespace AssetStudioMobile
                     if (model.Atlas != null) Write(folder, model.AtlasName, model.Atlas.m_Script);
 
                     var missing = 0;
+                    var pages = new List<string>();
+
                     foreach (var name in model.TextureNames)
                     {
                         if (!textures.TryGetValue(name, out var texture)) { missing++; continue; }
@@ -85,7 +87,13 @@ namespace AssetStudioMobile
                         if (plan == null) { missing++; continue; }
 
                         plan.Write(texture, dest, options);
+                        pages.Add(name);
                     }
+
+                    // The viewer will not open a Spine model until its own profile exists beside it.
+                    // Writing it means the folder can be used as exported.
+                    if (!model.DragonBones && pages.Count > 0 && model.Skeleton != null && model.Atlas != null)
+                        WriteProfile(folder, model, pages);
 
                     written++;
                     if (missing > 0) log($"{model.Base}：有 {missing} 个贴图没找到");
@@ -161,7 +169,7 @@ namespace AssetStudioMobile
             {
                 foreach (var candidate in LogicalNames(asset, containers))
                 {
-                    if (Attach(candidate, asset, models)) break;
+                    if (Attach(candidate, asset, containers, models)) break;
                 }
             }
 
@@ -219,7 +227,9 @@ namespace AssetStudioMobile
         }
 
         /// <summary>Attaches an asset to the model that already exists for it.</summary>
-        private static bool Attach(string name, TextAsset asset, Dictionary<string, Model> models)
+        private static bool Attach(string name, TextAsset asset,
+                                   IReadOnlyDictionary<Object, string> containers,
+                                   Dictionary<string, Model> models)
         {
             // A plain ".json" is a skeleton for the model of that name, if an atlas made one.
             if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
@@ -239,11 +249,28 @@ namespace AssetStudioMobile
             if (models.TryGetValue(bare, out var owner) && owner.Skeleton == null)
             {
                 owner.Skeleton = asset;
-                owner.SkeletonName = bare + ".json";
+
+                // Published name first, so this agrees with the same asset exported as a TextAsset:
+                // the container carries the extension the game addresses it by, and a ".json" guessed
+                // here is how a skeleton written as "..._SkeletonData.asset" became "...json" and
+                // stopped matching what its own profile names.
+                var published = PublishedName(asset, containers);
+                owner.SkeletonName = !string.IsNullOrEmpty(published) && Path.HasExtension(published)
+                    ? published
+                    : bare + ".json";
                 return true;
             }
 
             return false;
+        }
+
+        /// <summary>The file name the bundle publishes an asset under, or null.</summary>
+        private static string PublishedName(TextAsset asset, IReadOnlyDictionary<Object, string> containers)
+        {
+            if (containers == null || asset == null) return null;
+            if (!containers.TryGetValue(asset, out var container) || string.IsNullOrEmpty(container)) return null;
+
+            return Path.GetFileName(container);
         }
 
         private static readonly string[] PageProperties = { "size:", "format:", "filter:", "repeat:", "pma:" };
@@ -280,6 +307,65 @@ namespace AssetStudioMobile
             }
 
             return pages;
+        }
+
+        /// <summary>
+        /// Writes the viewer's own profile beside the model.
+        ///
+        /// The files alone are not enough -- Live2DViewerEX will not open a Spine model until one of
+        /// these exists, which is what its "create profile" dialog produces. A model exported without
+        /// it has to be opened, pointed at three or four files and saved by hand before it can be
+        /// seen at all, per model. The shape is small: a type, the skeleton's file name, and for the
+        /// atlas its file and its pages.
+        ///
+        /// Only for Spine. The viewer has no DragonBones runtime at all, so there is nothing a
+        /// profile could do for those.
+        /// </summary>
+        private static void WriteProfile(string folder, Model model, List<string> pages)
+        {
+            var json = new System.Text.StringBuilder();
+
+            json.AppendLine("{");
+            json.AppendLine("  \"conf_ver\": 1,");
+            json.AppendLine("  \"type\": 9,");
+            json.AppendLine("  \"controllers\": {");
+            json.AppendLine("    \"param_hit\": {},");
+            json.AppendLine("    \"param_loop\": {},");
+            json.AppendLine("    \"key_trigger\": {},");
+            json.AppendLine("    \"area_trigger\": {},");
+            json.AppendLine("    \"eye_blink\": { \"min_interval\": 500, \"max_interval\": 6000 },");
+            json.AppendLine("    \"lip_sync\": { \"gain\": 5.0 },");
+            json.AppendLine("    \"mouse_tracking\": { \"smooth_time\": 0.15 },");
+            json.AppendLine("    \"auto_breath\": {},");
+            json.AppendLine("    \"extra_motion\": {},");
+            json.AppendLine("    \"accelerometer\": {},");
+            json.AppendLine("    \"intimacy_system\": {},");
+            json.AppendLine("    \"battery\": {},");
+            json.AppendLine("    \"slot_opacity\": {},");
+            json.AppendLine("    \"slot_color\": {}");
+            json.AppendLine("  },");
+            json.AppendLine("  \"options\": { \"tex_type\": 0, \"edge_padding\": false, \"shader_type\": 1 },");
+            json.AppendLine($"  \"skeleton\": {Quote(model.SkeletonName)},");
+            json.AppendLine("  \"atlases\": [");
+            json.AppendLine("    {");
+            json.AppendLine($"      \"atlas\": {Quote(model.AtlasName)},");
+            json.AppendLine($"      \"tex_names\": [ {string.Join(", ", pages.Select(Quote))} ],");
+            json.AppendLine($"      \"textures\": [ {string.Join(", ", pages.Select(p => Quote(p + ".png")))} ]");
+            json.AppendLine("    }");
+            json.AppendLine("  ]");
+            json.AppendLine("}");
+
+            File.WriteAllText(Path.Combine(folder, model.Base + ".config.json"), json.ToString());
+        }
+
+        /// <summary>A JSON string, quoted, for a file name.</summary>
+        private static string Quote(string value)
+        {
+            var escaped = (value ?? string.Empty)
+                .Replace("\\", "\\\\").Replace("\"", "\\\"")
+                .Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
+
+            return "\"" + escaped + "\"";
         }
 
         private static void Write(string folder, string name, byte[] bytes)
