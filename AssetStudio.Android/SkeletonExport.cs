@@ -207,9 +207,10 @@ namespace AssetStudioMobile
                 model.Atlas = asset;
                 model.AtlasName = name;
 
-                // A Spine atlas opens with the page's image file name.
-                var page = FirstLine(asset.m_Script);
-                if (!string.IsNullOrEmpty(page))
+                // Every page, not just the first. A character atlas is several pages, and a model
+                // whose second page is missing cannot be opened by anything -- the big models here
+                // have up to four, and only the first was being written.
+                foreach (var page in PageNames(asset.m_Script))
                     model.TextureNames.Add(Path.GetFileNameWithoutExtension(page));
                 return true;
             }
@@ -245,16 +246,40 @@ namespace AssetStudioMobile
             return false;
         }
 
-        private static string FirstLine(byte[] bytes)
+        private static readonly string[] PageProperties = { "size:", "format:", "filter:", "repeat:", "pma:" };
+        private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".webp" };
+
+        /// <summary>
+        /// The page image names an atlas declares.
+        ///
+        /// A page block begins with its image file name and continues with that page's properties,
+        /// while a region block begins with a region name and continues with bounds and offsets. So
+        /// a line is a page name when the line after it is a page property -- or, for a page with no
+        /// properties at all, when it is an image file name.
+        /// </summary>
+        private static List<string> PageNames(byte[] bytes)
         {
-            if (bytes == null || bytes.Length == 0) return null;
+            var pages = new List<string>();
+            if (bytes == null || bytes.Length == 0) return pages;
 
-            var end = 0;
-            while (end < bytes.Length && bytes[end] != (byte)'\n' && bytes[end] != (byte)'\r') end++;
-            if (end == 0) return null;
+            string text;
+            try { text = System.Text.Encoding.UTF8.GetString(bytes); }
+            catch { return pages; }
 
-            try { return System.Text.Encoding.UTF8.GetString(bytes, 0, end).Trim(); }
-            catch { return null; }
+            var lines = text.Split('\n');
+            for (var i = 0; i < lines.Length; i++)
+            {
+                var line = lines[i].Trim();
+                if (line.Length == 0 || line.Contains(':')) continue;
+
+                var next = i + 1 < lines.Length ? lines[i + 1].Trim() : string.Empty;
+                var isPage = PageProperties.Any(p => next.StartsWith(p, StringComparison.OrdinalIgnoreCase))
+                          || ImageExtensions.Any(e => line.EndsWith(e, StringComparison.OrdinalIgnoreCase));
+
+                if (isPage && !pages.Contains(line)) pages.Add(line);
+            }
+
+            return pages;
         }
 
         private static void Write(string folder, string name, byte[] bytes)
