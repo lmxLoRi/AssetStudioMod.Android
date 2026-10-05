@@ -1744,6 +1744,12 @@ namespace AssetStudioMobile
             var name = asset?.m_Name;
             if (!string.IsNullOrEmpty(name) && Path.HasExtension(name)) return string.Empty;
 
+            // Before the container, the bytes. A Spine skeleton is a TextAsset called "M095_Spine"
+            // whose container path ends in ".asset" -- the SkeletonDataAsset the importer builds --
+            // so the container's extension is ".asset", which no Spine file has ever been. The bytes
+            // are JSON and there is no arguing with them.
+            if (LooksLikeJson(asset)) return ".json";
+
             // The container path next, as the desktop does: it carries the extension the asset is
             // actually published with even when the asset's own name does not.
             if (containers != null && asset != null && containers.TryGetValue(asset, out var container)
@@ -1754,6 +1760,21 @@ namespace AssetStudioMobile
             }
 
             return ".txt";
+        }
+
+        /// <summary>True when a text asset's bytes open as JSON, past any BOM and whitespace.</summary>
+        private static bool LooksLikeJson(TextAsset asset)
+        {
+            var script = asset?.m_Script;
+            if (script == null || script.Length == 0) return false;
+
+            var i = 0;
+            if (script.Length >= 3 && script[0] == 0xEF && script[1] == 0xBB && script[2] == 0xBF) i = 3;
+
+            while (i < script.Length && (script[i] == (byte)' ' || script[i] == (byte)'\t'
+                                      || script[i] == (byte)'\r' || script[i] == (byte)'\n')) i++;
+
+            return i < script.Length && (script[i] == (byte)'{' || script[i] == (byte)'[');
         }
 
         /// <summary>
