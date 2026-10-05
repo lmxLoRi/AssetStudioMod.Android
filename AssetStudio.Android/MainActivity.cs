@@ -132,6 +132,7 @@ namespace AssetStudioMobile
             _panel.SelfTestRequested += () => RunOnBackground(() => SelfTest.AppendResults(Append));
             _panel.BrowseRequested += OpenBrowser;
             _panel.ManageFilesRequested += OpenFiles;
+            _panel.Live2DRequested += () => RunOnBackground(ExportLive2D);
             _panel.PickScriptRequested += PickScript;
             _panel.ClearScriptRequested += ClearScript;
 
@@ -841,6 +842,52 @@ namespace AssetStudioMobile
             }
         }
 
+        /// <summary>
+        /// One click for every Live2D model in the tree.
+        ///
+        /// Loads with no filter first: a model's parts are spread over several bundles, and the
+        /// extractor has to see all of them at once to put a model back together.
+        /// </summary>
+        private void ExportLive2D()
+        {
+            if (_extractor == null)
+            {
+                SetStatus("请先「重新扫描」");
+                Append("还没有加载内容。先选文件夹或填好路径后按「加载」。");
+                return;
+            }
+
+            if (_exporting)
+            {
+                Append("已经在导出了，等它结束再点。");
+                return;
+            }
+
+            _exporting = true;
+            try
+            {
+                Append("正在加载全部资源以查找 Live2D 模型…");
+                Scan(Array.Empty<ExportKind>());
+                if (_extractor == null) return;
+
+                var destination = Path.Combine(OutputDirectory("Live2D"), "Live2D");
+                Append($"正在导出 Live2D → {destination}");
+
+                var count = _extractor.ExportLive2D(destination, Append);
+                SetStatus(count == 0 ? "没有找到 Live2D 模型" : $"Live2D: 已导出 {count} 个模型");
+            }
+            catch (Exception ex)
+            {
+                Append($"Live2D 导出失败：{ex.GetType().Name}: {ex.Message}");
+                SetStatus("Live2D 导出失败");
+            }
+            finally
+            {
+                _exporting = false;
+                RunOnUiThread(() => _browser?.SetExporting(false));
+            }
+        }
+
         /// <summary>Writes the objects the browser's index selected, loading each file once.</summary>
         private void ExportFiltered(IReadOnlyList<Extractor.IndexEntry> entries)
         {
@@ -879,11 +926,12 @@ namespace AssetStudioMobile
         }
 
         /// <summary>
-        /// The output directory for one export.
+        /// Where an export goes: the output folder, then a folder named after the input.
         ///
-        /// <paramref name="label"/> already names what is being written, so the mode is only added
-        /// when it is not in there already -- "Auto" used to end up in front of it twice, on
-        /// directories named Auto_Auto_TextAsset_....
+        /// It used to be a timestamped folder named after the mode and the categories, which says
+        /// nothing about where the files came from and makes every run a new pile. The input's own
+        /// name is stable, so a second export of the same thing lands in the same place, and the
+        /// type subfolders inside keep it sorted. Live2D models go there too, under Live2D.
         /// </summary>
         private string OutputDirectory(string label)
         {
@@ -891,8 +939,22 @@ namespace AssetStudioMobile
                 ? _outputDir
                 : _panel.OutputPath.Text.Trim();
 
-            var name = label.StartsWith(_mode.ToString(), StringComparison.Ordinal) ? label : $"{_mode}_{label}";
-            return Path.Combine(baseDir, $"{Sanitize(name)}_{DateTime.Now:yyyyMMdd_HHmmss}");
+            return Path.Combine(baseDir, Sanitize(InputName()));
+        }
+
+        /// <summary>The input's last path segment, without its extension.</summary>
+        private string InputName()
+        {
+            var path = _inputDir?.TrimEnd('/');
+            if (string.IsNullOrEmpty(path)) return "导出";
+
+            var name = Path.GetFileName(path);
+            if (string.IsNullOrEmpty(name)) return "导出";
+
+            // A folder keeps its name; a file drops the extension, so a picked
+            // "NS.daddylove_1.0.0_1.apk" exports into "NS.daddylove_1.0.0_1".
+            var stem = Path.GetFileNameWithoutExtension(name);
+            return string.IsNullOrEmpty(stem) ? name : stem;
         }
 
         private static string Sanitize(string label)

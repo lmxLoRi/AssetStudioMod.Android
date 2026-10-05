@@ -1016,6 +1016,46 @@ namespace AssetStudioMobile
             return report;
         }
 
+        /// <summary>
+        /// Writes every Live2D Cubism model the loaded tree holds, one folder each.
+        ///
+        /// Whole-tree by nature: a model's parts are spread across bundles, so this wants everything
+        /// loaded at once rather than a batch at a time -- see MainActivity.ExportLive2D, which
+        /// loads without a filter first.
+        /// </summary>
+        public int ExportLive2D(string outputRoot, Action<string> log)
+        {
+            if (_candidates == null) throw new InvalidOperationException("请先扫描一个文件夹。");
+
+            LoadEverything();
+
+            Directory.CreateDirectory(outputRoot);
+            return Live2DExport.Export(_assetsManager, ContainersIn(_assetsManager), outputRoot,
+                                       log ?? (_ => { }));
+        }
+
+        /// <summary>
+        /// Reads the whole tree into memory.
+        ///
+        /// Live2D needs it. A model's parts are spread across bundles, so nothing can be recognised
+        /// until all of them have been read -- without this the scan is lazy, the manager is empty,
+        /// and the search finds nothing at all and says so in no time. It is the one place the
+        /// batching is deliberately undone, which is why it is not how an ordinary export works.
+        /// </summary>
+        public void LoadEverything()
+        {
+            if (_candidates == null || !_released) return;
+
+            _assetsManager.Clear();
+            _assetsManager.ClearAssetFilter();
+
+            var filter = FiltersFor(LoadedCategories);
+            if (filter != null) _assetsManager.SetAssetFilter(filter);
+
+            LoadBatch(0, _candidates.Count);
+            _released = false;
+        }
+
         public ExportReport Export(string outputRoot, ExportOptions options)
         {
             var report = new ExportReport();
@@ -1174,7 +1214,15 @@ namespace AssetStudioMobile
                     }
                     else
                     {
-                        var dest = ClaimPath(claimed, outputRoot, DisplayName(obj), plan.Extension);
+                        // One folder per object type, so a tree of thousands does not land in one
+                        // directory: textures beside textures, scripts beside scripts, and a model's
+                        // parts findable together.
+                        var folder = Path.Combine(outputRoot, obj.type.ToString());
+
+                        // Created once per folder rather than once per asset.
+                        if (claimed.TryAdd("dir\u0000" + folder, true)) Directory.CreateDirectory(folder);
+
+                        var dest = ClaimPath(claimed, folder, DisplayName(obj), plan.Extension);
                         if (plan.Extension == ".rawdata" && options.Mode != ExportKind.RawData) report.RawFallback++;
 
                         try

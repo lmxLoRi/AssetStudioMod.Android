@@ -75,6 +75,13 @@ namespace AssetStudioMobile.Ui
         /// to remove them short of Shizuku or adb.
         /// </summary>
         public event Action ManageFilesRequested;
+
+        /// <summary>
+        /// Rebuild every Live2D Cubism model in the loaded tree, one folder each, the way the desktop
+        /// does. It needs the whole tree in memory at once, which is why it is its own action rather
+        /// than part of an export.
+        /// </summary>
+        public event Action Live2DRequested;
         public event Action PickScriptRequested;
         public event Action ClearScriptRequested;
 
@@ -130,6 +137,10 @@ namespace AssetStudioMobile.Ui
             var manage = new Button(activity) { Text = "管理文件" };
             manage.Click += (_, _) => ManageFilesRequested?.Invoke();
             root.AddView(manage);
+
+            var live2d = new Button(activity) { Text = "导出 Live2D 模型" };
+            live2d.Click += (_, _) => Live2DRequested?.Invoke();
+            root.AddView(live2d);
 
             // Encrypted bundles are a per-game scheme, so the tool takes the scheme as a script
             // rather than pretending to know it.
