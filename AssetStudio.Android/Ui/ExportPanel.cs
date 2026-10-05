@@ -82,6 +82,12 @@ namespace AssetStudioMobile.Ui
         /// than part of an export.
         /// </summary>
         public event Action Live2DRequested;
+
+        /// <summary>
+        /// Collect Spine and DragonBones animations into one folder per model. The desktop has no
+        /// Spine support to copy; the files are already complete, they are just scattered.
+        /// </summary>
+        public event Action SkeletonsRequested;
         public event Action PickScriptRequested;
         public event Action ClearScriptRequested;
 
@@ -141,6 +147,10 @@ namespace AssetStudioMobile.Ui
             var live2d = new Button(activity) { Text = "导出 Live2D 模型" };
             live2d.Click += (_, _) => Live2DRequested?.Invoke();
             root.AddView(live2d);
+
+            var skeletons = new Button(activity) { Text = "导出 Spine / DragonBones 骨骼动画" };
+            skeletons.Click += (_, _) => SkeletonsRequested?.Invoke();
+            root.AddView(skeletons);
 
             // Encrypted bundles are a per-game scheme, so the tool takes the scheme as a script
             // rather than pretending to know it.

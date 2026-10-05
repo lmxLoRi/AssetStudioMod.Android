@@ -133,6 +133,7 @@ namespace AssetStudioMobile
             _panel.BrowseRequested += OpenBrowser;
             _panel.ManageFilesRequested += OpenFiles;
             _panel.Live2DRequested += () => RunOnBackground(ExportLive2D);
+            _panel.SkeletonsRequested += () => RunOnBackground(ExportSkeletons);
             _panel.PickScriptRequested += PickScript;
             _panel.ClearScriptRequested += ClearScript;
 
@@ -880,6 +881,53 @@ namespace AssetStudioMobile
             {
                 Append($"Live2D 导出失败：{ex.GetType().Name}: {ex.Message}");
                 SetStatus("Live2D 导出失败");
+            }
+            finally
+            {
+                _exporting = false;
+                RunOnUiThread(() => _browser?.SetExporting(false));
+            }
+        }
+
+        /// <summary>
+        /// One click for every Spine and DragonBones animation in the tree.
+        ///
+        /// Whole-tree like Live2D: a skeleton's parts are separate assets, and they have to be found
+        /// together before they can be written into one folder.
+        /// </summary>
+        private void ExportSkeletons()
+        {
+            if (_extractor == null)
+            {
+                SetStatus("请先「重新扫描」");
+                Append("还没有加载内容。先选文件夹或填好路径后按「加载」。");
+                return;
+            }
+
+            if (_exporting)
+            {
+                Append("已经在导出了，等它结束再点。");
+                return;
+            }
+
+            _exporting = true;
+            try
+            {
+                Append("正在加载全部资源以查找骨骼动画…");
+                Scan(Array.Empty<ExportKind>());
+                if (_extractor == null) return;
+
+                var destination = Path.Combine(OutputDirectory("Skeletons"), "Skeletons");
+                Append($"正在导出骨骼动画 → {destination}");
+
+                var options = new ExportOptions { Mode = _mode, Overwrite = true };
+                var count = _extractor.ExportSkeletons(destination, options, Append);
+                SetStatus(count == 0 ? "没有找到骨骼动画" : $"骨骼动画：已导出 {count} 个模型");
+            }
+            catch (Exception ex)
+            {
+                Append($"骨骼动画导出失败：{ex.GetType().Name}: {ex.Message}");
+                SetStatus("骨骼动画导出失败");
             }
             finally
             {

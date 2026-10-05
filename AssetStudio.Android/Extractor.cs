@@ -1056,6 +1056,23 @@ namespace AssetStudioMobile
             _released = false;
         }
 
+        /// <summary>
+        /// Writes every Spine and DragonBones model the loaded tree holds, one folder each.
+        ///
+        /// Whole-tree like Live2D, and for the same reason: a skeleton's parts are separate assets
+        /// that have to be found together before they can be grouped.
+        /// </summary>
+        public int ExportSkeletons(string outputRoot, ExportOptions options, Action<string> log)
+        {
+            if (_candidates == null) throw new InvalidOperationException("请先扫描一个文件夹。");
+
+            LoadEverything();
+
+            Directory.CreateDirectory(outputRoot);
+            return SkeletonExport.Export(_assetsManager, ContainersIn(_assetsManager), outputRoot,
+                                         options, log ?? (_ => { }));
+        }
+
         public ExportReport Export(string outputRoot, ExportOptions options)
         {
             var report = new ExportReport();
@@ -1340,7 +1357,7 @@ namespace AssetStudioMobile
             _ => false,
         };
 
-        private sealed class ExportPlan
+        internal sealed class ExportPlan
         {
             public string Extension;
             public Action<AssetStudio.Object, string, ExportOptions> Write;
@@ -1351,8 +1368,8 @@ namespace AssetStudioMobile
         /// point of ExportKind.Auto: nothing is dropped just because no checkbox covered it, every
         /// type either has a real exporter here or falls back to a JSON dump.
         /// </summary>
-        private static ExportPlan Plan(AssetStudio.Object o, ExportOptions options,
-                                       IReadOnlyDictionary<AssetStudio.Object, string> containers = null)
+        internal static ExportPlan Plan(AssetStudio.Object o, ExportOptions options,
+                                        IReadOnlyDictionary<AssetStudio.Object, string> containers = null)
         {
             switch (o)
             {
