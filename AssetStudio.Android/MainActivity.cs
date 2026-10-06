@@ -37,6 +37,22 @@ namespace AssetStudioMobile
         /// <summary>And one index at a time, for the same reason.</summary>
         private bool _indexing;
 
+        /// <summary>
+        /// The folder this input's output and staging are filed under, taken from the path the user
+        /// gave rather than from the path actually read.
+        ///
+        /// Those differ: an app's directory is staged first, and the staged copy lives under this
+        /// app's own Android/data/<our package>/files/staged/<name>, so asking the read path which
+        /// package it belongs to answers with ours.
+        /// </summary>
+        private string _inputNamespace = "external";
+
+        private void SetInput(string path)
+        {
+            _inputDir = path;
+            _inputNamespace = InputNamespace(path);
+        }
+
         /// <summary>And one export at a time: they share the extractor and its manager.</summary>
         private bool _exporting;
 
@@ -72,7 +88,7 @@ namespace AssetStudioMobile
             // manager and from `adb push /sdcard/Android/data/<pkg>/files/bundles`, which makes
             // it trivial to sideload a bundle for testing. Falls back to private storage.
             var external = GetExternalFilesDir(null)?.AbsolutePath;
-            _inputDir = Path.Combine(external ?? FilesDir.AbsolutePath, "bundles");
+            SetInput(Path.Combine(external ?? FilesDir.AbsolutePath, "bundles"));
             _outputDir = Path.Combine(
                 global::Android.OS.Environment.GetExternalStoragePublicDirectory(
                     global::Android.OS.Environment.DirectoryDownloads)?.AbsolutePath
@@ -216,7 +232,7 @@ namespace AssetStudioMobile
                         {
                             var readable = ResolveReadable(browsePath);
                             if (readable == null) return;
-                            _inputDir = readable;
+                            _inputDir = readable;   // namespace already set by ResolveReadable   // namespace already set by ResolveReadable
                             RunOnUiThread(() => _panel.InputPath.Text = readable);
                         }
 
@@ -264,7 +280,7 @@ namespace AssetStudioMobile
                         {
                             var readable = ResolveReadable(exportPath);
                             if (readable == null) return;
-                            _inputDir = readable;
+                            _inputDir = readable;   // namespace already set by ResolveReadable   // namespace already set by ResolveReadable
                             RunOnUiThread(() => _panel.InputPath.Text = readable);
                         }
 
@@ -327,7 +343,7 @@ namespace AssetStudioMobile
             {
                 var readable = ResolveReadable(typed);
                 if (readable == null) return;
-                _inputDir = readable;
+                _inputDir = readable;   // namespace already set by ResolveReadable
                 RunOnUiThread(() => _panel.InputPath.Text = readable);
                 Scan();
             });
@@ -352,6 +368,9 @@ namespace AssetStudioMobile
                 return null;
             }
             try { full = Path.GetFullPath(full); } catch { /* keep the raw text for the error */ }
+
+            // From the path as given, before any staging changes it.
+            _inputNamespace = InputNamespace(full);
 
             // A file that can be opened is read where it is. This used to insist on a directory, so
             // a single picked or typed file went off to be staged through Shizuku -- a copy of the
@@ -385,7 +404,9 @@ namespace AssetStudioMobile
             // uid 2000 and cannot write into /data/user/0/<pkg>, which is the app's private
             // sandbox. The external dir is writable by shell (ext_data_rw) and by us.
             var externalRoot = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
-            var staging = Path.Combine(externalRoot, "staged");
+            // Namespaced, because the staging folder is named after the input's last segment and
+            // every game has a "files": the second tree staged under that name deleted the first.
+            var staging = Path.Combine(externalRoot, "staged", _inputNamespace);
             return ShizukuBridge.StageDirectory(full, staging, Append, (c, t) => Report(c, t));
         }
 
@@ -601,7 +622,7 @@ namespace AssetStudioMobile
                     SetStatus("cannot read that app's APK");
                     return;
                 }
-                _inputDir = dir;
+                SetInput(dir);
                 RunOnUiThread(() => _panel.InputPath.Text = dir);
                 Scan();
             });
@@ -626,7 +647,7 @@ namespace AssetStudioMobile
                 if (!string.IsNullOrEmpty(real) && File.Exists(real) && CanRead(real))
                 {
                     Append($"直接使用 {real}（不复制）");
-                    _inputDir = real;
+                    SetInput(real);
                     RunOnUiThread(() => _panel.InputPath.Text = real);
                     Scan();
                     return;
@@ -641,7 +662,7 @@ namespace AssetStudioMobile
                     return;
                 }
 
-                _inputDir = dir;
+                SetInput(dir);
                 RunOnUiThread(() => _panel.InputPath.Text = dir);
                 Scan();
             });
@@ -691,7 +712,7 @@ namespace AssetStudioMobile
             if (direct != null)
             {
                 Append($"直接使用 {direct}（不复制）");
-                _inputDir = direct;
+                SetInput(direct);
                 _panel.InputPath.Text = direct;
                 RunOnBackground(Scan); // feature 4: no separate scan step
                 return;
@@ -723,7 +744,7 @@ namespace AssetStudioMobile
                 var readable = ResolveReadable(picked);
                 if (readable != null)
                 {
-                    _inputDir = readable;
+                    _inputDir = readable;   // namespace already set by ResolveReadable
                     RunOnUiThread(() => _panel.InputPath.Text = readable);
                     Scan(); // feature 4: load straight after the directory is chosen
                     return;
@@ -987,7 +1008,43 @@ namespace AssetStudioMobile
                 ? _outputDir
                 : _panel.OutputPath.Text.Trim();
 
-            return Path.Combine(baseDir, Sanitize(InputName()));
+            // Package (or parent) first, then the input's own name. Two trees can end in the same
+            // segment -- every game has a "files", a "UnityCache", a "res" -- and with only that
+            // segment, the second export landed inside the first one's folder.
+            return Path.Combine(baseDir, _inputNamespace, Sanitize(InputName()));
+        }
+
+        /// <summary>
+        /// The folder an input's output and staging go under: its package name when it is an app's
+        /// own directory, otherwise the name of its parent.
+        ///
+        /// The last segment alone cannot tell two inputs apart. A package name is unique; for
+        /// anything else the parent's name is enough, because the parent is part of what makes the
+        /// path unique to begin with.
+        /// </summary>
+        private static string InputNamespace(string path)
+        {
+            if (!string.IsNullOrEmpty(path))
+            {
+                var parts = path.Replace('\\', '/').Split('/');
+
+                // The last one, not the first. A staged tree lives under this app's own
+                // Android/data/<our package>/files/staged/<the input>, so the first match is our own
+                // package name and the deepest is the game's -- which is the one that tells two
+                // inputs apart.
+                for (var i = parts.Length - 3; i >= 0; i--)
+                {
+                    if (!parts[i].Equals("Android", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!parts[i + 1].Equals("data", StringComparison.OrdinalIgnoreCase)
+                        && !parts[i + 1].Equals("obb", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    if (parts[i + 2].Length > 0) return Sanitize(parts[i + 2]);
+                }
+            }
+
+            var trimmed = path?.TrimEnd('/');
+            var parent = string.IsNullOrEmpty(trimmed) ? null : Path.GetFileName(Path.GetDirectoryName(trimmed));
+            return Sanitize(string.IsNullOrEmpty(parent) ? "external" : parent);
         }
 
         /// <summary>The input's last path segment, without its extension.</summary>
@@ -1008,7 +1065,10 @@ namespace AssetStudioMobile
         private static string Sanitize(string label)
         {
             var sb = new System.Text.StringBuilder(label.Length);
-            foreach (var c in label) sb.Append(char.IsLetterOrDigit(c) || c == '-' || c == '+' ? c : '_');
+            // '.' and '_' are kept so a package name survives as one: com.fknzj.qooapp, not
+            // com_fknzj_qooapp.
+            foreach (var c in label)
+                sb.Append(char.IsLetterOrDigit(c) || c is '-' or '+' or '.' or '_' ? c : '_');
             return sb.ToString();
         }
 

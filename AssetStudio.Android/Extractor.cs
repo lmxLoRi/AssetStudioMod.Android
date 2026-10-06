@@ -672,17 +672,43 @@ namespace AssetStudioMobile
         /// siblings stay next to each other, and the loader's dependency lookup is by name rather
         /// than by position, so nothing depends on a batch boundary falling anywhere in particular.
         /// </summary>
+        /// <summary>
+        /// The batches the model passes (Live2D, skeletons) walk.
+        ///
+        /// Smaller than an export's, and with a collection after each, because those passes hold a
+        /// batch's decompressed objects while they look for models -- and 64 bundles of 32 MB can
+        /// decompress to far more than that, with the pools and the collector holding on to it. The
+        /// measured peak on a 3.9 GB cache was 1.3 GB and climbing before this; an export survives
+        /// that because it writes and drops one batch at a time, but this did not.
+        /// </summary>
+        private static IEnumerable<(int Start, int Count)> ModelBatches(List<Candidate> files)
+            => Batches(files, ModelBatchFiles, ModelBatchBytes);
+
+        private const int ModelBatchFiles = 16;
+        private const long ModelBatchBytes = 8L * 1024 * 1024;
+
+        /// <summary>Releases a batch's memory before the next one is read.</summary>
+        private static void ReleaseBatch()
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
         private static IEnumerable<(int Start, int Count)> Batches(List<Candidate> files)
+            => Batches(files, BatchFiles, BatchBytes);
+
+        private static IEnumerable<(int Start, int Count)> Batches(List<Candidate> files, int maxFiles, long maxBytes)
         {
             var i = 0;
             while (i < files.Count)
             {
                 var end = i;
                 long bytes = 0;
-                while (end < files.Count && end - i < BatchFiles)
+                while (end < files.Count && end - i < maxFiles)
                 {
                     // Always take at least one file, even one bigger than the whole budget.
-                    if (end > i && bytes + files[end].Length > BatchBytes) break;
+                    if (end > i && bytes + files[end].Length > maxBytes) break;
                     bytes += files[end].Length;
                     end++;
                 }
@@ -1023,54 +1049,167 @@ namespace AssetStudioMobile
         /// loaded at once rather than a batch at a time -- see MainActivity.ExportLive2D, which
         /// loads without a filter first.
         /// </summary>
+        /// <summary>
+        /// One model's worth of the tree: what it is, and which bundles its parts are in.
+        /// </summary>
+        private sealed class ModelGroup
+        {
+            public string Key;
+            public readonly HashSet<string> Sources = new HashSet<string>(StringComparer.Ordinal);
+        }
+
+        /// <summary>
+        /// First half of a two-phase model export: read the tree a batch at a time and keep only the
+        /// fact that a model exists and where its parts live.
+        ///
+        /// Nothing is written and nothing is kept beyond a name and a handful of paths per model, so
+        /// a 4 GB cache costs a few megabytes to survey. Merging by key is what makes a model whose
+        /// parts are spread over several bundles one model rather than one piece per batch.
+        /// </summary>
+        private List<ModelGroup> DiscoverModels(
+            Func<AssetsManager, IReadOnlyDictionary<AssetStudio.Object, string>,
+                 IEnumerable<(string Key, List<string> Sources)>> discover,
+            string what, Action<string> log)
+        {
+            var groups = new Dictionary<string, ModelGroup>(StringComparer.Ordinal);
+            var batches = new List<(int Start, int Count)>(ModelBatches(_candidates));
+
+            // The parts are found through container paths, not through references, so following a
+            // bundle's externals would only pour the tree into memory.
+            var previous = _assetsManager.LoadDependencies;
+            _assetsManager.LoadDependencies = false;
+            try
+            {
+
+            for (var b = 0; b < batches.Count; b++)
+            {
+                var (start, count) = batches[b];
+
+                _assetsManager.Clear();
+                _indexedCandidate = -1;
+                LoadBatch(start, count);
+
+                foreach (var (key, sources) in discover(_assetsManager, ContainersIn(_assetsManager)))
+                {
+                    if (!groups.TryGetValue(key, out var group))
+                        groups[key] = group = new ModelGroup { Key = key };
+
+                    foreach (var source in sources) group.Sources.Add(source);
+                }
+
+                _assetsManager.Clear();
+                ReleaseBatch();
+                Report(b + 1, batches.Count);
+            }
+
+            log($"{what}：扫完 {batches.Count} 批，找到 {groups.Count} 个模型");
+            }
+            finally
+            {
+                _assetsManager.LoadDependencies = previous;
+            }
+
+            return groups.Values.ToList();
+        }
+
+        /// <summary>
+        /// Second half: load each model's own bundles and hand it to the ordinary export.
+        ///
+        /// One model at a time. The peak is that model rather than a batch, and every part is present
+        /// however many bundles it was spread over -- which is the whole point of having surveyed
+        /// first.
+        /// </summary>
+        private int ExportModels(List<ModelGroup> groups, string what,
+                                 Func<AssetsManager, IReadOnlyDictionary<AssetStudio.Object, string>, int> write,
+                                 Action<string> log)
+        {
+            var written = 0;
+
+            for (var i = 0; i < groups.Count; i++)
+            {
+                var group = groups[i];
+                var indexes = new List<int>();
+
+                foreach (var source in group.Sources)
+                {
+                    var index = CandidateFor(source);
+                    if (index >= 0 && !indexes.Contains(index)) indexes.Add(index);
+                }
+
+                if (indexes.Count == 0)
+                {
+                    log($"{what}：{group.Key} 的 bundle 已不在候选里，跳过");
+                    continue;
+                }
+
+                log($"{what}：[{i + 1}/{groups.Count}] {group.Key}（{indexes.Count} 个 bundle）");
+
+                _assetsManager.Clear();
+                _indexedCandidate = -1;
+
+                // Same reason as the survey: this model's own bundles are all it needs.
+                var previousLoad = _assetsManager.LoadDependencies;
+                _assetsManager.LoadDependencies = false;
+                try
+                {
+                    foreach (var index in indexes) LoadBatch(index, 1);
+                }
+                finally
+                {
+                    _assetsManager.LoadDependencies = previousLoad;
+                }
+
+                try
+                {
+                    written += write(_assetsManager, ContainersIn(_assetsManager));
+                }
+                catch (Exception ex)
+                {
+                    log($"{what}：{group.Key} 导出失败 {ex.GetType().Name}: {ex.Message}");
+                }
+
+                _assetsManager.Clear();
+                ReleaseBatch();
+            }
+
+            return written;
+        }
+
+        /// <summary>
+        /// Writes every Live2D Cubism model in the tree, one folder each.
+        ///
+        /// Two passes, because the tree does not fit in memory and a model's parts do not all live in
+        /// one bundle: the first reads it a batch at a time and notes where each model's parts are,
+        /// the second loads one model's bundles at a time and rebuilds it. The containers are read
+        /// again in the second pass, and they come out the same -- a container path belongs to the
+        /// bundle that publishes the asset -- so the extractor sees exactly what it would have seen
+        /// with the whole tree loaded.
+        /// </summary>
         public int ExportLive2D(string outputRoot, Action<string> log)
         {
             if (_candidates == null) throw new InvalidOperationException("请先扫描一个文件夹。");
 
-            LoadEverything();
-
             Directory.CreateDirectory(outputRoot);
-            return Live2DExport.Export(_assetsManager, ContainersIn(_assetsManager), outputRoot,
-                                       log ?? (_ => { }));
+            log ??= _ => { };
+
+            var groups = DiscoverModels(Live2DExport.Discover, "Live2D", log);
+            return ExportModels(groups, "Live2D",
+                (manager, containers) => Live2DExport.Export(manager, containers, outputRoot, log), log);
         }
 
-        /// <summary>
-        /// Reads the whole tree into memory.
-        ///
-        /// Live2D needs it. A model's parts are spread across bundles, so nothing can be recognised
-        /// until all of them have been read -- without this the scan is lazy, the manager is empty,
-        /// and the search finds nothing at all and says so in no time. It is the one place the
-        /// batching is deliberately undone, which is why it is not how an ordinary export works.
-        /// </summary>
-        public void LoadEverything()
-        {
-            if (_candidates == null || !_released) return;
-
-            _assetsManager.Clear();
-            _assetsManager.ClearAssetFilter();
-
-            var filter = FiltersFor(LoadedCategories);
-            if (filter != null) _assetsManager.SetAssetFilter(filter);
-
-            LoadBatch(0, _candidates.Count);
-            _released = false;
-        }
-
-        /// <summary>
-        /// Writes every Spine and DragonBones model the loaded tree holds, one folder each.
-        ///
-        /// Whole-tree like Live2D, and for the same reason: a skeleton's parts are separate assets
-        /// that have to be found together before they can be grouped.
-        /// </summary>
+        /// <summary>Writes every Spine and DragonBones model in the tree, one folder each. See
+        /// <see cref="ExportLive2D"/> for why this is two passes.</summary>
         public int ExportSkeletons(string outputRoot, ExportOptions options, Action<string> log)
         {
             if (_candidates == null) throw new InvalidOperationException("请先扫描一个文件夹。");
 
-            LoadEverything();
-
             Directory.CreateDirectory(outputRoot);
-            return SkeletonExport.Export(_assetsManager, ContainersIn(_assetsManager), outputRoot,
-                                         options, log ?? (_ => { }));
+            log ??= _ => { };
+
+            var groups = DiscoverModels(SkeletonExport.Discover, "骨骼动画", log);
+            return ExportModels(groups, "骨骼动画",
+                (manager, containers) => SkeletonExport.Export(manager, containers, outputRoot, options, log),
+                log);
         }
 
         public ExportReport Export(string outputRoot, ExportOptions options)
@@ -1695,7 +1834,7 @@ namespace AssetStudioMobile
         /// entry could not be traced back to its bundle, so opening one reported "the object is not
         /// in this file" and a filtered export matched 368 of 1905 objects.
         /// </summary>
-        private static string SourcePath(SerializedFile file)
+        internal static string SourcePath(SerializedFile file)
             => file?.originalPath ?? file?.fullName ?? file?.fileName ?? string.Empty;
 
         private int CandidateFor(string source)

@@ -52,16 +52,7 @@ namespace AssetStudioMobile
             log($"找到 {models.Count} 个骨骼动画（Spine {models.Values.Count(m => !m.DragonBones)} 个，" +
                 $"DragonBones {models.Values.Count(m => m.DragonBones)} 个）");
 
-            // A texture is only written for a model that named it, so the lookup is built once.
-            var textures = new Dictionary<string, Texture2D>(StringComparer.Ordinal);
-            foreach (var file in manager.AssetsFileList)
-            {
-                foreach (var obj in file.Objects)
-                {
-                    if (obj is Texture2D texture && !string.IsNullOrEmpty(texture.m_Name))
-                        textures[texture.m_Name] = texture;
-                }
-            }
+            var textures = Textures(manager);
 
             var written = 0;
             foreach (var model in models.Values.OrderBy(m => m.Base, StringComparer.Ordinal))
@@ -96,7 +87,17 @@ namespace AssetStudioMobile
                         WriteProfile(folder, model, pages);
 
                     written++;
-                    if (missing > 0) log($"{model.Base}：有 {missing} 个贴图没找到");
+
+                    // Read one batch at a time, so a model whose parts are spread over more than one
+                    // bundle arrives in pieces. Said out loud, because half a model written in
+                    // silence looks like a model.
+                    var incomplete = new List<string>();
+                    if (model.Skeleton == null) incomplete.Add("骨架");
+                    if (model.Atlas == null) incomplete.Add("图集");
+                    if (missing > 0) incomplete.Add($"{missing} 个贴图");
+
+                    if (incomplete.Count > 0)
+                        log($"{model.Base}：这批里缺 {string.Join("、", incomplete)}（可能跨 bundle）");
                 }
                 catch (Exception ex)
                 {
@@ -130,6 +131,56 @@ namespace AssetStudioMobile
             }
 
             return names;
+        }
+
+        /// <summary>Every texture the manager holds, by name -- a model names its pages.</summary>
+        private static Dictionary<string, Texture2D> Textures(AssetsManager manager)
+        {
+            var textures = new Dictionary<string, Texture2D>(StringComparer.Ordinal);
+            foreach (var file in manager.AssetsFileList)
+            {
+                foreach (var obj in file.Objects)
+                {
+                    if (obj is Texture2D texture && !string.IsNullOrEmpty(texture.m_Name))
+                        textures[texture.m_Name] = texture;
+                }
+            }
+            return textures;
+        }
+
+        /// <summary>
+        /// What models these objects describe, and which bundles hold each one.
+        ///
+        /// The first half of a two-phase export. It answers "what is here and where" without keeping
+        /// any of it, so the caller can read the tree one batch at a time and clear each batch -- and
+        /// because the answer is keyed by the model's own base name, a model whose parts are spread
+        /// over several bundles is still one entry once the batches are merged.
+        ///
+        /// The second half loads only the bundles named here, one model at a time, and runs the
+        /// ordinary export over them. Peak memory is one model instead of one tree.
+        /// </summary>
+        public static IEnumerable<(string Key, List<string> Sources)> Discover(
+            AssetsManager manager, IReadOnlyDictionary<Object, string> containers)
+        {
+            var textures = Textures(manager);
+
+            foreach (var model in Find(manager, containers).Values)
+            {
+                var sources = new List<string>();
+
+                if (model.Skeleton != null) sources.Add(Extractor.SourcePath(model.Skeleton.assetsFile));
+                if (model.Atlas != null) sources.Add(Extractor.SourcePath(model.Atlas.assetsFile));
+
+                foreach (var name in model.TextureNames)
+                {
+                    if (textures.TryGetValue(name, out var texture))
+                        sources.Add(Extractor.SourcePath(texture.assetsFile));
+                }
+
+                sources.RemoveAll(string.IsNullOrEmpty);
+                if (sources.Count > 0)
+                    yield return ($"{(model.DragonBones ? "db" : "spine")}:{model.Base}", sources);
+            }
         }
 
         /// <summary>

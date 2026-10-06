@@ -76,6 +76,31 @@ namespace AssetStudioMobile
             return written;
         }
 
+        /// <summary>
+        /// What Live2D models these objects describe, and which bundles hold each one.
+        ///
+        /// The first half of a two-phase export, for the same reason as the skeletons': the whole
+        /// tree does not fit in memory, and a model's parts do not all live in one bundle. Recording
+        /// only where the parts are lets the tree be read a batch at a time, and lets the second half
+        /// load one model at a time instead.
+        /// </summary>
+        public static IEnumerable<(string Key, List<string> Sources)> Discover(
+            AssetsManager manager, IReadOnlyDictionary<Object, string> containers)
+        {
+            var models = Find(manager);
+            var paths = ModelPaths(models, containers);
+
+            foreach (var group in Group(models, paths, containers))
+            {
+                var sources = new List<string> { Extractor.SourcePath(group.Key.assetsFile) };
+                foreach (var member in group.Value) sources.Add(Extractor.SourcePath(member.assetsFile));
+
+                sources.RemoveAll(string.IsNullOrEmpty);
+                if (sources.Count > 0)
+                    yield return ($"l2d:{group.Key.m_Name}#{group.Key.m_PathID}", sources);
+            }
+        }
+
         /// <summary>Every moc found, with its model when one could be resolved.</summary>
         private static Dictionary<MonoBehaviour, CubismModel> Find(AssetsManager manager)
         {

@@ -180,6 +180,13 @@ namespace AssetStudioMobile.Ui
                         return b.Bytes.CompareTo(a.Bytes);
                     });
 
+                    // The entries are rebuilt from the sorted list, in the same order the adapter
+                    // is about to be filled. They used to be sorted apart -- the list by size, the
+                    // entries not at all -- and since a tap is looked up in the entries by position,
+                    // tapping one folder opened another.
+                    _entries.Clear();
+                    _entries.AddRange(sized.Select(x => x.Entry));
+
                     _total.Text = $"合计 {Human(grand)}";
                     _adapter.Clear();
                     foreach (var (entry, bytes) in sized)

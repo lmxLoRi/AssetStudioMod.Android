@@ -16,6 +16,19 @@ namespace AssetStudio
     public class AssetsManager
     {
         public bool LoadViaTypeTree = true;
+
+        /// <summary>
+        /// Whether to follow the externals a file names to others beside it as well.
+        ///
+        /// True for an ordinary export: a texture can live in a shared bundle the asset merely points
+        /// at, and the object is unusable without it. False for a pass that goes looking for specific
+        /// assets by name -- the Live2D and skeleton exports find a model's parts through the
+        /// bundle's own container list, so nothing is gained by following references, and the queue
+        /// is drained while it grows, so one bundle that references a few hundred others loads all of
+        /// them. Measured on a 3.9 GB cache: a batch meant to be 8 MB pulled in enough to reach 4 GB
+        /// resident.
+        /// </summary>
+        public bool LoadDependencies = true;
         public bool MeshLazyLoad = true;
         public ImportOptions Options = new ImportOptions();
         public readonly List<Action<OptionsFile>> OptionLoaders = new List<Action<OptionsFile>>();
@@ -246,8 +259,11 @@ namespace AssetStudio
                                 }
                                 if (File.Exists(sharedFilePath))
                                 {
-                                    importFiles.Add(sharedFilePath);
-                                    importFilesHash.Add(sharedFileName);
+                                    if (LoadDependencies)
+                                    {
+                                        importFiles.Add(sharedFilePath);
+                                        importFilesHash.Add(sharedFileName);
+                                    }
                                 }
                                 else
                                 {
