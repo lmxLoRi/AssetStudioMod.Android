@@ -609,6 +609,63 @@ namespace AssetStudioMobile
         /// Loads one range of the scan. This is the only place the loader is called, so it is the
         /// only place that decides how much is in memory at once.
         /// </summary>
+        /// <summary>
+        /// Loads a set of bundles in one call.
+        ///
+        /// One call, not one per bundle. The survey loads a batch at a time and reads these files
+        /// perfectly well; the second pass used to hand them over one at a time, and a single-file
+        /// load of this game's cache -- where a bundle is a directory holding "__data" and "__info" --
+        /// comes back with nothing at all. Its models then assembled from an empty manager, which is
+        /// where "这批里缺 骨架" came from.
+        /// </summary>
+        private void LoadTogether(List<Candidate> files)
+        {
+            if (files.Count == 0) return;
+
+            LoadBatch(_assetsManager, files, 0, files.Count, out var loaded, out var objects, out var parent);
+            _lastParent = parent;
+            _loadedFiles += loaded;
+            _loadedObjects += objects;
+
+            try
+            {
+                System.IO.File.AppendAllLines(System.IO.Path.Combine(
+                    Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath
+                        ?? Android.App.Application.Context.FilesDir.AbsolutePath,
+                    "load-report.txt"),
+                    new[]
+                    {
+                        $"加载 {files.Count} 个 → 读出 {loaded} 个文件",
+                    }.Concat(files.Select(f => $"    {f.Path}")));
+            }
+            catch { }
+
+            if (loaded > 0) return;
+
+            // Nothing came of handing over the files themselves. This game's cache stores a bundle as
+            // a directory holding "__data" and "__info", and that one file loads as an empty manager
+            // while the directory it sits in loads; the survey never noticed because it reads whole
+            // batches. Nothing is lost by trying, since a load that read no file has nothing to clear.
+            var dirs = new List<string>();
+            foreach (var file in files)
+            {
+                var dir = Path.GetDirectoryName(file.Path);
+                if (!string.IsNullOrEmpty(dir) && !dirs.Contains(dir)) dirs.Add(dir);
+            }
+
+            if (dirs.Count == 0 || dirs.Count > 64) return;
+
+            _assetsManager.Clear();
+
+            var asFolders = new List<Candidate>(dirs.Count);
+            foreach (var dir in dirs) asFolders.Add(new Candidate(dir, 0));
+
+            LoadBatch(_assetsManager, asFolders, 0, asFolders.Count, out loaded, out objects, out parent);
+            _lastParent = parent;
+            _loadedFiles += loaded;
+            _loadedObjects += objects;
+        }
+
         private void LoadBatch(int start, int count)
         {
             LoadBatch(_assetsManager, _candidates, start, count, out var files, out var objects, out var parent);
@@ -1056,6 +1113,17 @@ namespace AssetStudioMobile
         {
             public string Key;
             public readonly HashSet<string> Sources = new HashSet<string>(StringComparer.Ordinal);
+
+            /// <summary>
+            /// The batches this model's parts were seen in.
+            ///
+            /// Kept because a recorded path is not always loadable on its own. This game's cache
+            /// stores a bundle as a directory holding "__data" and "__info", and handing that one
+            /// file to the loader returns nothing -- while the batch it was discovered in loads
+            /// perfectly. Recording where a part was seen means the second pass can read it the same
+            /// way the survey did.
+            /// </summary>
+            public readonly List<int> BatchCandidates = new List<int>();
         }
 
         /// <summary>
@@ -1074,6 +1142,16 @@ namespace AssetStudioMobile
             var groups = new Dictionary<string, ModelGroup>(StringComparer.Ordinal);
             var batches = new List<(int Start, int Count)>(ModelBatches(_candidates));
 
+            // Instrumentation, not a change to how anything works. The export pairs the way it always
+            // has; this records what that pairing left on the floor, one line per asset per batch, in a
+            // file because it runs to thousands of lines.
+            var report = new List<string>();
+            var reportPath = Path.Combine(
+                Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath
+                    ?? Android.App.Application.Context.FilesDir.AbsolutePath,
+                "survey-report.txt");
+            try { if (File.Exists(reportPath)) File.Delete(reportPath); } catch { }
+
             // The parts are found through container paths, not through references, so following a
             // bundle's externals would only pour the tree into memory.
             var previous = _assetsManager.LoadDependencies;
@@ -1089,17 +1167,53 @@ namespace AssetStudioMobile
                 _indexedCandidate = -1;
                 LoadBatch(start, count);
 
-                foreach (var (key, sources) in discover(_assetsManager, ContainersIn(_assetsManager)))
+                var containers = ContainersIn(_assetsManager);
+                var emitted = 0;
+
+                if (what == "骨骼动画")
+                {
+                    try
+                    {
+                        report.Add($"== 第 {b + 1} 批，候选 {count} 个 ==");
+                        for (var k = 0; k < count && k < 2; k++)
+                            report.Add($"   候选路径: {_candidates[start + k].Path}");
+                        report.AddRange(SkeletonExport.Explain(_assetsManager, containers));
+                    }
+                    catch { }
+                }
+
+                foreach (var (key, sources) in discover(_assetsManager, containers))
                 {
                     if (!groups.TryGetValue(key, out var group))
                         groups[key] = group = new ModelGroup { Key = key };
 
                     foreach (var source in sources) group.Sources.Add(source);
+                    emitted++;
+
+                    if (group.BatchCandidates.Count < 64)
+                    {
+                        for (var k = 0; k < count; k++) group.BatchCandidates.Add(start + k);
+                    }
                 }
+
+                report.Add($"   → 本批产出 {emitted} 条零件");
 
                 _assetsManager.Clear();
                 ReleaseBatch();
                 Report(b + 1, batches.Count);
+            }
+
+            if (report.Count > 0)
+            {
+                try
+                {
+                    File.WriteAllLines(reportPath, report);
+                    log($"{what}：配对报告写到 {reportPath}");
+                }
+                catch (Exception ex)
+                {
+                    log($"{what}：配对报告写不出去 {ex.GetType().Name}");
+                }
             }
 
             log($"{what}：扫完 {batches.Count} 批，找到 {groups.Count} 个模型");
@@ -1124,17 +1238,45 @@ namespace AssetStudioMobile
                                  Action<string> log)
         {
             var written = 0;
+            var retried = 0;
+            var recovered = 0;
+            var reused = 0;
+
+            // What the manager is currently holding. A model's parts can all be in one bundle, and on
+            // this cache one bundle held several dozen models -- 120 MB of them -- so loading it once
+            // per model read the same file thirty times. It also happens that the second read of that
+            // file comes back empty, which is what left those models written with an atlas and no
+            // skeleton. Keeping what is already loaded fixes both.
+            var loaded = new HashSet<int>();
+
+            // Written to a file, not the screen. The screen log cuts a long path off, which is
+            // exactly the thing being looked at here, and this is the third time a diagnostic has
+            // been misread because of the channel it went through.
+            var groupPath = Path.Combine(
+                Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath
+                    ?? Android.App.Application.Context.FilesDir.AbsolutePath,
+                "groups-report.txt");
+            try { if (File.Exists(groupPath)) File.Delete(groupPath); } catch { }
 
             for (var i = 0; i < groups.Count; i++)
             {
                 var group = groups[i];
                 var indexes = new List<int>();
 
+                var unresolved = new List<string>();
+
                 foreach (var source in group.Sources)
                 {
                     var index = CandidateFor(source);
                     if (index >= 0 && !indexes.Contains(index)) indexes.Add(index);
+                    else if (index < 0) unresolved.Add(source);
                 }
+
+                // Deliberately not the batch each part was seen in. Adding those made every group's
+                // candidate set different, so the reuse check below never matched, so the same 120 MB
+                // bundle was loaded once per model -- and the second load of it comes back empty, which
+                // is what left 176 models written with an atlas and no skeleton. Loading by the parts
+                // alone means a bundle shared by several models is read once and kept.
 
                 if (indexes.Count == 0)
                 {
@@ -1142,21 +1284,75 @@ namespace AssetStudioMobile
                     continue;
                 }
 
-                log($"{what}：[{i + 1}/{groups.Count}] {group.Key}（{indexes.Count} 个 bundle）");
+                var shown = string.Join(" | ", indexes.Take(2).Select(j => _candidates[j].Path));
+                var filesAfterLoad = _assetsManager.AssetsFileList.Count;
 
-                _assetsManager.Clear();
-                _indexedCandidate = -1;
-
-                // Same reason as the survey: this model's own bundles are all it needs.
-                var previousLoad = _assetsManager.LoadDependencies;
-                _assetsManager.LoadDependencies = false;
                 try
                 {
-                    foreach (var index in indexes) LoadBatch(index, 1);
+                    if (filesAfterLoad == 0) retried++;
+
+                    var lines = new List<string>
+                    {
+                        $"[{i + 1}/{groups.Count}] {group.Key} 索引 {indexes.Count} 来源 {group.Sources.Count} 批 {group.BatchCandidates.Count} 读出 {filesAfterLoad}",
+                    };
+                    foreach (var j in indexes) lines.Add($"    候选: {_candidates[j].Path}");
+                    foreach (var source in unresolved) lines.Add($"    **无法解析的来源: {source}");
+                    File.AppendAllLines(groupPath, lines);
                 }
-                finally
+                catch { }
+                log($"{what}：[B6] [{i + 1}/{groups.Count}] {group.Key}" +
+                    $"（索引 {indexes.Count} / 来源 {group.Sources.Count} / 批 {group.BatchCandidates.Count}）{shown}");
+
+                if (what == "骨骼动画")
                 {
-                    _assetsManager.LoadDependencies = previousLoad;
+                    try
+                    {
+                        log($"    载入后：{SkeletonExport.CountParts(_assetsManager, ContainersIn(_assetsManager))}");
+                    }
+                    catch { }
+                }
+
+                var alreadyLoaded = indexes.All(loaded.Contains);
+
+                if (alreadyLoaded)
+                {
+                    reused++;
+                }
+                else
+                {
+                    _assetsManager.Clear();
+                    loaded.Clear();
+
+                    // Same reason as the survey: this model's own bundles are all it needs.
+                    var previousLoad = _assetsManager.LoadDependencies;
+                    _assetsManager.LoadDependencies = false;
+                    try
+                    {
+                        LoadTogether(indexes.Select(i => _candidates[i]).ToList());
+                    }
+                    finally
+                    {
+                        _assetsManager.LoadDependencies = previousLoad;
+                    }
+
+                    foreach (var index in indexes) loaded.Add(index);
+                }
+
+                if (_assetsManager.AssetsFileList.Count == 0)
+                {
+                    var retryPrevious = _assetsManager.LoadDependencies;
+                    _assetsManager.LoadDependencies = false;
+                    try
+                    {
+                        _assetsManager.Clear();
+                        LoadTogether(indexes.Select(j => _candidates[j]).ToList());
+                    }
+                    finally
+                    {
+                        _assetsManager.LoadDependencies = retryPrevious;
+                    }
+
+                    if (_assetsManager.AssetsFileList.Count > 0) recovered++;
                 }
 
                 try
@@ -1172,6 +1368,7 @@ namespace AssetStudioMobile
                 ReleaseBatch();
             }
 
+            log($"{what}：读空 {retried} 组，重试后恢复 {recovered} 组，复用已加载 {reused} 组");
             return written;
         }
 
@@ -1192,6 +1389,11 @@ namespace AssetStudioMobile
             Directory.CreateDirectory(outputRoot);
             log ??= _ => { };
 
+            // Whatever filter the preview or the index left on the manager, it is not wanted here. The
+            // survey reads the tree unfiltered; a filtered manager materialises fewer objects, so the
+            // skeleton the survey found in a bundle need not be there on the export's second read.
+            _assetsManager.ClearAssetFilter();
+
             var groups = DiscoverModels(Live2DExport.Discover, "Live2D", log);
             return ExportModels(groups, "Live2D",
                 (manager, containers) => Live2DExport.Export(manager, containers, outputRoot, log), log);
@@ -1205,6 +1407,9 @@ namespace AssetStudioMobile
 
             Directory.CreateDirectory(outputRoot);
             log ??= _ => { };
+
+            // See ExportLive2D.
+            _assetsManager.ClearAssetFilter();
 
             var groups = DiscoverModels(SkeletonExport.Discover, "骨骼动画", log);
             return ExportModels(groups, "骨骼动画",
