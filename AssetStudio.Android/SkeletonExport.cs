@@ -8,581 +8,408 @@ using Object = AssetStudio.Object;
 namespace AssetStudioMobile
 {
     /// <summary>
-    /// Collects skeleton animations -- Spine and DragonBones -- into one folder per model.
+    /// Spine and DragonBones models, found once and then written from what was found.
     ///
-    /// There is nothing to copy here from the desktop, because the desktop has no Spine support at
-    /// all: no extractor, no grouping, no mention of the word. It writes the parts by name and the
-    /// extension work is what made them readable; the files arrive already complete.
-    ///
-    /// So this is not a parser. A skeleton's parts are separate assets that already contain
-    /// everything, and what is missing is that they are scattered: the atlas describes the pages, the
-    /// skeleton names the atlas, the texture holds the picture, and they sit in the output next to
-    /// thousands of unrelated files. Grouping them is the whole job.
-    ///
-    /// Two naming schemes, both from what the games call things:
-    ///     Spine        "model.atlas"  "model.json"  "model.png"    (the atlas names its page)
-    ///     DragonBones  "model_ske.json"  "model_tex.json"  "model_tex.png"
+    /// The finding is separated from the writing on purpose. A model's parts are separate assets, they
+    /// do not all live in one bundle, and -- the part that cost the most to learn -- what an asset is
+    /// cannot be told from its name: a game publishes the same atlas text under two container names, a
+    /// Spine skeleton with no extension at all, and a DragonBones skeleton as "_ske.json". So the
+    /// survey decides, by content, which asset is the skeleton, which is the atlas and which textures
+    /// are its pages, and hands those decisions over as asset references. The writer loads the bundles
+    /// and writes exactly what it was given. Nothing decides a second time, and nothing looks at an
+    /// extension.
     /// </summary>
     internal static class SkeletonExport
     {
-        private sealed class Model
+        /// <summary>
+        /// Where an asset lives: the bundle it was read from, and its id within it. Path ids are
+        /// unique inside one file, so the pair identifies an asset without holding on to it.
+        /// </summary>
+        public readonly struct Ref
         {
+            public readonly string Bundle;
+            public readonly long PathID;
+
+            public Ref(string bundle, long pathID)
+            {
+                Bundle = bundle;
+                PathID = pathID;
+            }
+
+            public bool IsSet => !string.IsNullOrEmpty(Bundle);
+        }
+
+        /// <summary>One model, as the survey found it: exactly which assets to write, and under what names.</summary>
+        public sealed class Plan
+        {
+            public string Key;
             public string Base;
             public bool DragonBones;
-            public TextAsset Skeleton;
+
+            public Ref Skeleton;
             public string SkeletonName;
-            public TextAsset Atlas;
+
+            public Ref Atlas;
             public string AtlasName;
-            public readonly List<string> TextureNames = new List<string>();
+
+            /// <summary>The atlas's pages, in the order the atlas declares them.</summary>
+            public readonly List<string> Pages = new List<string>();
+
+            /// <summary>Each page's texture, filled in by the caller from the survey's texture map.</summary>
+            public readonly Dictionary<string, Ref> PageRefs = new Dictionary<string, Ref>(StringComparer.Ordinal);
+
+            /// <summary>The bundles this model needs loaded.</summary>
+            public readonly HashSet<string> Sources = new HashSet<string>(StringComparer.Ordinal);
         }
 
-        public static int Export(AssetsManager manager,
-                                 IReadOnlyDictionary<Object, string> containers,
-                                 string outputRoot,
-                                 ExportOptions options,
-                                 Action<string> log)
+        private static string Head(byte[] bytes, int limit)
         {
-            var models = Find(manager, containers, explain: true);
-            if (models.Count == 0)
-            {
-                log("没有找到 Spine 或 DragonBones 骨骼动画");
-                return 0;
-            }
-
-            log($"找到 {models.Count} 个骨骼动画（Spine {models.Values.Count(m => !m.DragonBones)} 个，" +
-                $"DragonBones {models.Values.Count(m => m.DragonBones)} 个）");
-
-            var textures = Textures(manager);
-
-            var written = 0;
-            foreach (var model in models.Values.OrderBy(m => m.Base, StringComparer.Ordinal))
-            {
-                try
-                {
-                    var folder = Path.Combine(outputRoot, model.DragonBones ? "DragonBones" : "Spine",
-                                              Safe(model.Base));
-                    Directory.CreateDirectory(folder);
-
-                    if (model.Skeleton != null) Write(folder, model.SkeletonName, model.Skeleton.m_Script);
-                    if (model.Atlas != null) Write(folder, model.AtlasName, model.Atlas.m_Script);
-
-                    var missing = 0;
-                    var pages = new List<string>();
-
-                    foreach (var name in model.TextureNames)
-                    {
-                        if (!textures.TryGetValue(name, out var texture)) { missing++; continue; }
-
-                        var dest = Path.Combine(folder, name + ".png");
-                        var plan = Extractor.Plan(texture, options, containers);
-                        if (plan == null) { missing++; continue; }
-
-                        plan.Write(texture, dest, options);
-                        pages.Add(name);
-                    }
-
-                    // The viewer will not open a Spine model until its own profile exists beside it.
-                    // Writing it means the folder can be used as exported.
-                    if (!model.DragonBones && pages.Count > 0 && model.Skeleton != null && model.Atlas != null)
-                        WriteProfile(folder, model, pages);
-
-                    written++;
-
-                    // Read one batch at a time, so a model whose parts are spread over more than one
-                    // bundle arrives in pieces. Said out loud, because half a model written in
-                    // silence looks like a model.
-                    var incomplete = new List<string>();
-                    if (model.Skeleton == null) incomplete.Add("骨架");
-                    if (model.Atlas == null) incomplete.Add("图集");
-                    if (missing > 0) incomplete.Add($"{missing} 个贴图");
-
-                    if (incomplete.Count > 0)
-                        log($"{model.Base}：这批里缺 {string.Join("、", incomplete)}（可能跨 bundle）");
-                }
-                catch (Exception ex)
-                {
-                    log($"骨骼动画导出失败（{model.Base}）：{ex.GetType().Name}: {ex.Message}");
-                }
-            }
-
-            log($"骨骼动画：已导出 {written} 个模型到 {outputRoot}");
-            return written;
+            try { return System.Text.Encoding.UTF8.GetString(bytes, 0, Math.Min(bytes.Length, limit)); }
+            catch { return string.Empty; }
         }
 
         /// <summary>
-        /// The names an asset might be known by, best first.
-        ///
-        /// Both are needed, because the two families keep their extension in different places. A
-        /// Spine part carries it in its own name ("M095_Spine.atlas"); a DragonBones part does not
-        /// ("M098_Model_ske") and is published with it (".../M098_Model_ske.json"). Classifying by
-        /// either one alone found half a tree and reported the other half as empty -- 28 Spine and
-        /// no DragonBones, then 42 DragonBones and no Spine.
+        /// A Spine atlas, by what it holds: page lines with size and bounds, and no JSON braces.
+        /// A DragonBones atlas is JSON, and holds SubTextures.
         /// </summary>
-        private static List<string> LogicalNames(TextAsset asset, IReadOnlyDictionary<Object, string> containers)
-        {
-            var names = new List<string>(2);
-            if (!string.IsNullOrEmpty(asset.m_Name)) names.Add(asset.m_Name);
-
-            if (containers != null && containers.TryGetValue(asset, out var container)
-                && !string.IsNullOrEmpty(container))
-            {
-                var file = Path.GetFileName(container);
-                if (!string.IsNullOrEmpty(file) && !names.Contains(file)) names.Add(file);
-            }
-
-            // And each of those with its extension taken off.
-            //
-            // A Spine skeleton is published either with no extension at all, or as ".skel", or as
-            // "_ske.json"/"_tex.json"; the atlas is ".atlas". The model's name is what is left when
-            // that comes off, and it is the name the two sides have to agree on. The matching rules
-            // knew ".json" and nothing else, so every skeleton published as "X.skel" failed to attach
-            // to the atlas "X.atlas" -- and X.atlas was written with its pages and no skeleton. That
-            // is 176 of 429 models on the cache this was found on, and the survey had already reported
-            // the two as a pair, because it matches on content.
-            foreach (var name in names.ToList())
-            {
-                var stripped = BaseOf(name);
-                if (!string.IsNullOrEmpty(stripped) && !names.Contains(stripped)) names.Add(stripped);
-            }
-
-            return names;
-        }
-
-        /// <summary>
-        /// How many skeletons and atlases a loaded set actually holds, for the export's own log.
-        ///
-        /// The question it answers is which side is failing: if a group was loaded with its skeleton's
-        /// bundle and the set still holds no skeleton, the bundle was never in the group; if it holds
-        /// one and no model came out of it, the assembly is what failed.
-        /// </summary>
-        public static string CountParts(AssetsManager manager, IReadOnlyDictionary<Object, string> containers)
-        {
-            var skeletons = 0;
-            var atlases = 0;
-
-            foreach (var file in manager.AssetsFileList)
-            {
-                foreach (var obj in file.Objects)
-                {
-                    if (!(obj is TextAsset asset) || asset.m_Script == null || asset.m_Script.Length == 0)
-                        continue;
-
-                    if (LooksLikeAtlas(asset.m_Script)) atlases++;
-                    else if (LooksLikeSkeleton(asset.m_Script)) skeletons++;
-                }
-            }
-
-            var texts = 0;
-            foreach (var file in manager.AssetsFileList)
-                foreach (var obj in file.Objects)
-                    if (obj is TextAsset) texts++;
-
-            return $"图集 {atlases}、骨架 {skeletons}、文本资产共 {texts}、文件 {manager.AssetsFileList.Count}";
-        }
-
-        /// <summary>
-        /// What this batch holds, and which of it the assembly failed to take.
-        ///
-        /// Instrumentation, not a change to how anything works: the export keeps pairing the way it
-        /// always has, and this only says what that pairing left on the floor. The interesting number
-        /// is how many skeletons were read and attached to nothing -- each one is a model that will be
-        /// written without an animation, and the names on the line are what a working pairing has to
-        /// go on instead.
-        /// </summary>
-        public static List<string> Explain(AssetsManager manager, IReadOnlyDictionary<Object, string> containers)
-        {
-            var lines = new List<string>();
-
-            var models = Find(manager, containers);
-            var texts = new List<TextAsset>();
-            foreach (var file in manager.AssetsFileList)
-                foreach (var obj in file.Objects)
-                    if (obj is TextAsset t && t.m_Script != null && t.m_Script.Length > 0) texts.Add(t);
-
-            var usedSkeletons = new HashSet<TextAsset>();
-            var usedAtlases = new HashSet<TextAsset>();
-            foreach (var model in models.Values)
-            {
-                if (model.Skeleton != null) usedSkeletons.Add(model.Skeleton);
-                if (model.Atlas != null) usedAtlases.Add(model.Atlas);
-            }
-
-            foreach (var asset in texts)
-            {
-                var names = LogicalNames(asset, containers);
-                var first = names.Count > 0 ? names[0] : "(无名)";
-                var published = PublishedName(asset, containers) ?? "-";
-
-                if (usedAtlases.Contains(asset))
-                {
-                    lines.Add($"图集   {first}  | 发布名 {published}  | 已建模型");
-                }
-                else if (usedSkeletons.Contains(asset))
-                {
-                    lines.Add($"骨架   {first}  | 发布名 {published}  | 已配上一个模型");
-                }
-                else if (LooksLikeSkeleton(asset.m_Script))
-                {
-                    lines.Add($"骨架   {first}  | 发布名 {published}  | **没配上任何模型**");
-                }
-                else if (LooksLikeAtlas(asset.m_Script))
-                {
-                    lines.Add($"图集   {first}  | 发布名 {published}  | **没建出模型**");
-                }
-            }
-
-            return lines;
-        }
-
-        /// <summary>Content, because the names of a Spine skeleton do not say what it is.</summary>
-        private static bool LooksLikeSkeleton(byte[] bytes)
-        {
-            var head = Head(bytes);
-            return head.Contains("\"skeleton\"") || head.Contains("\"armature\"");
-        }
-
         private static bool LooksLikeAtlas(byte[] bytes)
         {
-            var head = Head(bytes);
+            if (bytes == null || bytes.Length == 0) return false;
+
+            var head = Head(bytes, 4096);
             if (head.Contains('{')) return head.Contains("\"SubTexture\"");
             return head.Contains("bounds:") && head.Contains("size:");
         }
 
-        private static string Head(byte[] bytes)
+        /// <summary>A skeleton, by what it holds: Spine declares a skeleton, DragonBones an armature.</summary>
+        private static bool LooksLikeSkeleton(byte[] bytes)
         {
-            try { return System.Text.Encoding.UTF8.GetString(bytes, 0, Math.Min(bytes.Length, 4096)); }
-            catch { return string.Empty; }
+            if (bytes == null || bytes.Length == 0) return false;
+
+            var head = Head(bytes, 4096);
+            return head.Contains("\"skeleton\"") || head.Contains("\"armature\"");
         }
 
-        /// <summary>Every texture the manager holds, by name -- a model names its pages.</summary>
-        private static Dictionary<string, Texture2D> Textures(AssetsManager manager)
+        private static bool IsDragonBones(string name, byte[] bytes)
         {
-            var textures = new Dictionary<string, Texture2D>(StringComparer.Ordinal);
-            foreach (var file in manager.AssetsFileList)
-            {
-                foreach (var obj in file.Objects)
-                {
-                    if (obj is Texture2D texture && !string.IsNullOrEmpty(texture.m_Name))
-                        textures[texture.m_Name] = texture;
-                }
-            }
-            return textures;
+            if (name.EndsWith("_ske", StringComparison.OrdinalIgnoreCase)) return true;
+            if (name.EndsWith("_tex", StringComparison.OrdinalIgnoreCase)) return true;
+
+            var head = Head(bytes, 2048);
+            return head.Contains("\"armature\"") || head.Contains("\"SubTexture\"");
         }
 
         /// <summary>
-        /// What models these objects describe, and which bundles hold each one.
-        ///
-        /// The first half of a two-phase export. It answers "what is here and where" without keeping
-        /// any of it, so the caller can read the tree one batch at a time and clear each batch -- and
-        /// because the answer is keyed by the model's own base name, a model whose parts are spread
-        /// over several bundles is still one entry once the batches are merged.
-        ///
-        /// The second half loads only the bundles named here, one model at a time, and runs the
-        /// ordinary export over them. Peak memory is one model instead of one tree.
+        /// The name the model goes by: the asset's own name with whatever the two families append to
+        /// it taken off. It is what the skeleton and the atlas have in common, and nothing else is.
         /// </summary>
-        public static IEnumerable<(string Key, List<string> Sources)> Discover(
-            AssetsManager manager, IReadOnlyDictionary<Object, string> containers)
-        {
-            var textures = Textures(manager);
-
-            foreach (var file in manager.AssetsFileList)
-            {
-                foreach (var obj in file.Objects)
-                {
-                    if (!(obj is TextAsset asset) || asset.m_Script == null || asset.m_Script.Length == 0)
-                        continue;
-
-                    if (!(asset.m_Script is byte[] bytes)) continue;
-                    var isAtlas = LooksLikeAtlas(bytes);
-                    if (!isAtlas && !LooksLikeSkeleton(bytes)) continue;
-
-                    // The asset's own name, not the name its bundle publishes it under. A skeleton
-                    // and its atlas share the first (both are the model's name) and often do not share
-                    // the second -- Enemy_8017's parts are published as
-                    // "Enemy_FulfillingStage006_8018_4.prefab", which is why keying on the published
-                    // name left them in two groups and the atlas without its skeleton.
-                    var name = asset.m_Name;
-                    if (string.IsNullOrEmpty(name)) name = LogicalNames(asset, containers).FirstOrDefault();
-                    if (string.IsNullOrEmpty(name)) continue;
-
-                    var sources = new List<string> { Extractor.SourcePath(file) };
-
-                    if (isAtlas)
-                    {
-                        foreach (var page in PageNames(bytes))
-                        {
-                            if (textures.TryGetValue(Path.GetFileNameWithoutExtension(page), out var texture))
-                                sources.Add(Extractor.SourcePath(texture.assetsFile));
-                        }
-                    }
-
-                    sources.RemoveAll(string.IsNullOrEmpty);
-                    if (sources.Count == 0) continue;
-
-                    // Filed under the model's own name, not under whatever this batch assembled.
-                    //
-                    // A model's parts do not have to share a bundle, and on this cache they do not:
-                    // Enemy_8017's atlas and its skeleton are published under the same container path
-                    // but live in different bundles. Pairing inside one batch therefore paired nothing
-                    // for those models -- and the export wrote them with an atlas, its pages, and no
-                    // skeleton, which was 176 of 429. Both parts carry the model's name, so filing them
-                    // by that name is enough for the merge to bring them back together.
-                    yield return ($"{(LooksLikeDragon(name, bytes) ? "db" : "spine")}:{BaseOf(name)}", sources);
-                }
-            }
-        }
-
-        /// <summary>File names, not model names: strip whatever extension either family kept.</summary>
         private static string BaseOf(string name)
         {
+            if (string.IsNullOrEmpty(name)) return name;
+
+            // The suffixes these games put on a part's name. "_skel" is the one that mattered: the
+            // skeleton of "2nd Anniversary Login" is published as "2nd Anniversary Login_skel", and
+            // stripping only "_ske" left it filed under a name of its own, unpaired, and the model was
+            // reported -- wrongly -- as having no skeleton in the tree at all.
             foreach (var suffix in new[]
                      {
                          ".atlas.txt", ".atlas", "_ske.json", "_tex.json", ".json", ".skel", ".asset",
+                         "_skel", "_skeleton", "_skeledata", "_atlas", "_texture",
                          "_ske", "_tex",
                      })
             {
                 if (name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
                     return name.Substring(0, name.Length - suffix.Length);
             }
+
             return Path.GetFileNameWithoutExtension(name);
-        }
-
-        private static bool LooksLikeDragon(string name, byte[] bytes)
-        {
-            if (name.EndsWith("_ske", StringComparison.OrdinalIgnoreCase)) return true;
-            if (name.EndsWith("_tex", StringComparison.OrdinalIgnoreCase)) return true;
-            try
-            {
-                var head = System.Text.Encoding.UTF8.GetString(bytes, 0, Math.Min(bytes.Length, 2048));
-                return head.Contains("\"armature\"") || head.Contains("\"SubTexture\"");
-            }
-            catch { return false; }
-        }
-
-        /// Groups the assets by the model their names say they belong to.
-        ///
-        /// Two passes, and the order is the whole point. A model is created by its atlas -- or its
-        /// "_ske"/"_tex" pair -- and a skeleton can only be attached to a model that already exists.
-        /// One pass therefore lost every skeleton that came before its atlas in the file order:
-        /// 8 of 28 models had a skeleton and 20 had none, and which was which depended on nothing
-        /// but where the assets happened to sit in the bundles.
-        /// </summary>
-        private static Dictionary<string, Model> Find(AssetsManager manager,
-                                                      IReadOnlyDictionary<Object, string> containers,
-                                                      bool explain = false)
-        {
-            var models = new Dictionary<string, Model>(StringComparer.Ordinal);
-            var textAssets = new List<TextAsset>();
-
-            foreach (var file in manager.AssetsFileList)
-            {
-                foreach (var obj in file.Objects)
-                {
-                    if (obj is TextAsset asset && !string.IsNullOrEmpty(asset.m_Name)) textAssets.Add(asset);
-                }
-            }
-
-            // Pass one: what defines a model.
-            foreach (var asset in textAssets)
-            {
-                foreach (var candidate in LogicalNames(asset, containers))
-                {
-                    if (Anchor(candidate, asset, models)) break;
-                }
-            }
-
-            // Pass two: what belongs to one.
-            foreach (var asset in textAssets)
-            {
-                foreach (var candidate in LogicalNames(asset, containers))
-                {
-                    if (Attach(candidate, asset, containers, models)) break;
-                }
-            }
-
-            if (explain) Explain2(textAssets, models);
-            return models;
-        }
-
-        /// <summary>Creates a model from the asset that defines it.</summary>
-        private static bool Anchor(string name, TextAsset asset, Dictionary<string, Model> models)
-        {
-            Model ModelFor(string baseName, bool dragonBones)
-            {
-                if (!models.TryGetValue(baseName, out var model))
-                {
-                    model = new Model { Base = baseName, DragonBones = dragonBones };
-                    models[baseName] = model;
-                }
-                return model;
-            }
-
-            // DragonBones first: its names also end in ".json".
-            if (name.EndsWith("_ske.json", StringComparison.OrdinalIgnoreCase))
-            {
-                var model = ModelFor(name.Substring(0, name.Length - "_ske.json".Length), true);
-                model.Skeleton = asset;
-                model.SkeletonName = name;
-                return true;
-            }
-
-            if (name.EndsWith("_tex.json", StringComparison.OrdinalIgnoreCase))
-            {
-                var model = ModelFor(name.Substring(0, name.Length - "_tex.json".Length), true);
-                model.Atlas = asset;
-                model.AtlasName = name;
-                model.TextureNames.Add(model.Base + "_tex");
-                return true;
-            }
-
-            foreach (var suffix in new[] { ".atlas.txt", ".atlas" })
-            {
-                if (!name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) continue;
-
-                var model = ModelFor(name.Substring(0, name.Length - suffix.Length), false);
-                model.Atlas = asset;
-                model.AtlasName = name;
-
-                // Every page, not just the first. A character atlas is several pages, and a model
-                // whose second page is missing cannot be opened by anything -- the big models here
-                // have up to four, and only the first was being written.
-                foreach (var page in PageNames(asset.m_Script))
-                    model.TextureNames.Add(Path.GetFileNameWithoutExtension(page));
-                return true;
-            }
-
-            return false;
-        }
-
-        /// <summary>Attaches an asset to the model that already exists for it.</summary>
-        private static bool Attach(string name, TextAsset asset,
-                                   IReadOnlyDictionary<Object, string> containers,
-                                   Dictionary<string, Model> models)
-        {
-            // A plain ".json" is a skeleton for the model of that name, if an atlas made one.
-            if (name.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
-            {
-                var stem = name.Substring(0, name.Length - ".json".Length);
-                if (!models.TryGetValue(stem, out var model) || model.Skeleton != null) return false;
-
-                model.Skeleton = asset;
-                model.SkeletonName = name;
-                return true;
-            }
-
-            // A spine-unity skeleton is often named with no extension anywhere: m_Name is
-            // "M098_Spine" and the container is ".../M098_Spine_SkeletonData.asset", while the
-            // content is the skeleton. Its own base name is the model it belongs to.
-            var bare = name;
-            if (models.TryGetValue(bare, out var owner) && owner.Skeleton == null)
-            {
-                owner.Skeleton = asset;
-
-                // The asset's own name, with the extension the container publishes it under -- the
-                // same pair an ordinary TextAsset export produces, so the two agree.
-                //
-                // The container's whole file name is not used: it carries the game's internal
-                // "_SkeletonData" suffix, which is a name nothing else refers to and not the one the
-                // viewer's profile dialog shows.
-                var extension = Path.GetExtension(PublishedName(asset, containers));
-                owner.SkeletonName = string.IsNullOrEmpty(extension) ? bare + ".json" : bare + extension;
-                return true;
-            }
-
-            return false;
-        }
-
-        /// <summary>
-        /// Writes what one assembly saw and what it made of it.
-        ///
-        /// To a file. The question is narrow now -- the survey already brings a model's parts together
-        /// and the export still writes 176 of 429 without a skeleton -- so this says whether the loaded
-        /// set held a skeleton at all, and which names the two sides offered each other when it did.
-        /// </summary>
-        private static void Explain2(List<TextAsset> textAssets, Dictionary<string, Model> models)
-        {
-            try
-            {
-                var path = System.IO.Path.Combine(
-                    Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath
-                        ?? Android.App.Application.Context.FilesDir.AbsolutePath,
-                    "find-report.txt");
-
-                var lines = new List<string>
-                {
-                    $"=== 载入集：文本资产 {textAssets.Count} → 模型 {models.Count}" +
-                    $"（有骨架 {models.Values.Count(m => m.Skeleton != null)}）===",
-                };
-
-                foreach (var asset in textAssets.Take(8))
-                    lines.Add($"    文本资产: {asset.m_Name}  脚本 {asset.m_Script?.Length ?? -1} 字节");
-
-                foreach (var model in models.Values.Where(m => m.Skeleton == null).Take(8))
-                    lines.Add($"    没配上: 模型 {model.Base}，图集 m_Name={model.Atlas?.m_Name}");
-
-                System.IO.File.AppendAllLines(path, lines);
-            }
-            catch { }
         }
 
         /// <summary>The file name the bundle publishes an asset under, or null.</summary>
         private static string PublishedName(TextAsset asset, IReadOnlyDictionary<Object, string> containers)
-        {
-            if (containers == null || asset == null) return null;
-            if (!containers.TryGetValue(asset, out var container) || string.IsNullOrEmpty(container)) return null;
+            => containers != null && containers.TryGetValue(asset, out var container) ? container : null;
 
-            return Path.GetFileName(container);
+        /// <summary>
+        /// The name to write an asset under: its own, plus the extension the bundle publishes it with.
+        ///
+        /// The container's whole file name is not used. It carries the game's own suffixes -- a Spine
+        /// skeleton that is called "M095_Spine" is published under "..._SkeletonData.asset" -- which
+        /// nothing else refers to and which the viewer's own profile dialog does not show.
+        /// </summary>
+        private static string WrittenName(string name)
+        {
+            // As told: a name that carries its own extension is written as it is, and one without an
+            // extension gets ".asset". The container's extension is deliberately not used -- it is the
+            // game's internal name for the bundle entry, and taking it is what put an atlas's bytes
+            // into a file called ".prefab".
+            return Path.HasExtension(name) ? name : name + ".asset";
         }
 
         private static readonly string[] PageProperties = { "size:", "format:", "filter:", "repeat:", "pma:" };
         private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".webp" };
 
         /// <summary>
-        /// The page image names an atlas declares.
+        /// Every page an atlas declares, in order.
         ///
-        /// A page block begins with its image file name and continues with that page's properties,
-        /// while a region block begins with a region name and continues with bounds and offsets. So
-        /// a line is a page name when the line after it is a page property -- or, for a page with no
-        /// properties at all, when it is an image file name.
+        /// All of them, not just the first: a character atlas is several pages and a model whose second
+        /// page is missing cannot be opened by anything. The big atlases here have up to four.
         /// </summary>
         private static List<string> PageNames(byte[] bytes)
         {
             var pages = new List<string>();
             if (bytes == null || bytes.Length == 0) return pages;
 
-            string text;
-            try { text = System.Text.Encoding.UTF8.GetString(bytes); }
-            catch { return pages; }
-
-            var lines = text.Split('\n');
+            var lines = Head(bytes, 1 << 20).Split('\n');
             for (var i = 0; i < lines.Length; i++)
             {
                 var line = lines[i].Trim();
                 if (line.Length == 0 || line.Contains(':')) continue;
 
                 var next = i + 1 < lines.Length ? lines[i + 1].Trim() : string.Empty;
-                var isPage = PageProperties.Any(p => next.StartsWith(p, StringComparison.OrdinalIgnoreCase))
-                          || ImageExtensions.Any(e => line.EndsWith(e, StringComparison.OrdinalIgnoreCase));
-
-                if (isPage && !pages.Contains(line)) pages.Add(line);
+                if (PageProperties.Any(x => next.StartsWith(x, StringComparison.OrdinalIgnoreCase))
+                    || ImageExtensions.Any(x => line.EndsWith(x, StringComparison.OrdinalIgnoreCase)))
+                {
+                    var name = Path.GetFileNameWithoutExtension(line);
+                    if (!pages.Contains(name)) pages.Add(name);
+                }
             }
 
             return pages;
         }
 
         /// <summary>
-        /// Writes the viewer's own profile beside the model.
+        /// Reads the tree and says what is in it: one plan per part, decided by content.
         ///
-        /// The files alone are not enough -- Live2DViewerEX will not open a Spine model until one of
-        /// these exists, which is what its "create profile" dialog produces. A model exported without
-        /// it has to be opened, pointed at three or four files and saved by hand before it can be
-        /// seen at all, per model. The shape is small: a type, the skeleton's file name, and for the
-        /// atlas its file and its pages.
-        ///
-        /// Only for Spine. The viewer has no DragonBones runtime at all, so there is nothing a
-        /// profile could do for those.
+        /// A part is filed under the name of the model it belongs to, so the caller can merge the
+        /// batches and end up with one model per name however many bundles its parts were spread over.
+        /// Atlas and skeleton are told apart by what they hold, never by what they are called -- a game
+        /// publishes the same atlas text twice, once as "X.atlas" and once as "X.prefab", and calling
+        /// the second one a skeleton is what wrote 211 of 429 models an atlas in place of a skeleton.
         /// </summary>
-        private static void WriteProfile(string folder, Model model, List<string> pages)
+        public static IEnumerable<Plan> Discover(AssetsManager manager,
+                                                 IReadOnlyDictionary<Object, string> containers)
+        {
+            foreach (var file in manager.AssetsFileList)
+            {
+                var bundle = Extractor.SourcePath(file);
+
+                foreach (var obj in file.Objects)
+                {
+                    if (!(obj is TextAsset asset) || asset.m_Script == null || asset.m_Script.Length == 0)
+                        continue;
+
+                    var name = asset.m_Name;
+                    if (string.IsNullOrEmpty(name)) continue;
+
+                    // By name, and by the exact suffixes the two families use. The atlas is "<x>.atlas"
+                    // and the skeleton is "<x>.skel", so both reduce to "<x>" and pair with each other.
+                    //
+                    // Nothing else is looked at. In particular "_Atlas" and "_SkeletonData" are
+                    // MonoBehaviours -- the game's own AtlasAsset and SkeletonDataAsset -- and are not
+                    // TextAssets at all, so they are never seen here; and there is exactly one
+                    // "<x>.atlas", so a model cannot pick up a second copy of its own atlas.
+                    string baseName;
+                    bool dragon;
+                    bool isAtlas;
+
+                    if (name.EndsWith(".atlas", StringComparison.OrdinalIgnoreCase))
+                    {
+                        baseName = name.Substring(0, name.Length - ".atlas".Length);
+                        dragon = false;
+                        isAtlas = true;
+                    }
+                    else if (name.EndsWith(".skel", StringComparison.OrdinalIgnoreCase))
+                    {
+                        baseName = name.Substring(0, name.Length - ".skel".Length);
+                        dragon = false;
+                        isAtlas = false;
+                    }
+                    else if (name.EndsWith("_tex.json", StringComparison.OrdinalIgnoreCase))
+                    {
+                        baseName = name.Substring(0, name.Length - "_tex.json".Length);
+                        dragon = true;
+                        isAtlas = true;
+                    }
+                    else if (name.EndsWith("_ske.json", StringComparison.OrdinalIgnoreCase))
+                    {
+                        baseName = name.Substring(0, name.Length - "_ske.json".Length);
+                        dragon = true;
+                        isAtlas = false;
+                    }
+                    else if (!Path.HasExtension(name))
+                    {
+                        // A skeleton whose name carries no extension at all: the asset is simply called
+                        // "Character_24" beside the atlas "Character_24.atlas". This is the common case
+                        // here, and accepting only ".skel" left every one of them unfound -- which is
+                        // why models kept being reported as having no skeleton in the tree at all.
+                        //
+                        // On its own such an asset is not a model: the writer only writes a model that
+                        // has an atlas. So an ordinary extension-less TextAsset -- a script, a table --
+                        // never turns into a folder of its own.
+                        baseName = name;
+                        dragon = false;
+                        isAtlas = false;
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(baseName)) continue;
+
+                    var plan = new Plan
+                    {
+                        Key = $"{(dragon ? "db" : "spine")}:{baseName}",
+                        Base = Safe(baseName),
+                        DragonBones = dragon,
+                    };
+
+                    var reference = new Ref(bundle, asset.m_PathID);
+
+                    if (isAtlas)
+                    {
+                        plan.Atlas = reference;
+                        plan.AtlasName = WrittenName(name);
+
+                        // The pages the atlas itself names, which is where "x", "x_2", "x_3" come from.
+                        foreach (var page in PageNames(asset.m_Script)) plan.Pages.Add(page);
+                    }
+                    else
+                    {
+                        plan.Skeleton = reference;
+                        plan.SkeletonName = WrittenName(name);
+                    }
+
+                    if (!string.IsNullOrEmpty(bundle)) plan.Sources.Add(bundle);
+                    yield return plan;
+                }
+            }
+        }
+
+        /// <summary>The asset a reference points at, in a manager that has had its bundles loaded.</summary>
+        private static T Resolve<T>(AssetsManager manager, Ref reference) where T : Object
+        {
+            if (!reference.IsSet) return null;
+
+            // Matched on the path id, not on the path. A cache file does not report the same path every
+            // time it is read -- the survey recorded "__data" for these textures and the export's
+            // reloaded copy reports something else -- so an exact-path match found nothing even though
+            // the asset was sitting in the loaded set. A path id is unique inside its file, and a file
+            // of the same name is preferred when two files happen to share one.
+            var wanted = Path.GetFileName(reference.Bundle);
+            T found = null;
+
+            foreach (var file in manager.AssetsFileList)
+            {
+                var path = Extractor.SourcePath(file);
+                var samePath = string.Equals(path, reference.Bundle, StringComparison.Ordinal);
+                var sameName = string.Equals(Path.GetFileName(path), wanted, StringComparison.OrdinalIgnoreCase);
+
+                foreach (var obj in file.Objects)
+                {
+                    if (obj.m_PathID != reference.PathID || !(obj is T typed)) continue;
+
+                    if (samePath) return typed;
+                    if (found == null || sameName) found = typed;
+                }
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Writes one model from its plan: the assets the survey named, and nothing else.
+        ///
+        /// No matching happens here. Whatever the survey decided an asset is, it stays; an atlas is
+        /// never promoted to a skeleton, and a model that has no skeleton is written without one and
+        /// without a profile claiming it has one.
+        /// </summary>
+        public static int Write(AssetsManager manager,
+                                IReadOnlyDictionary<Object, string> containers,
+                                string outputRoot,
+                                ExportOptions options,
+                                Action<string> log,
+                                Plan plan)
+        {
+            var folder = Path.Combine(outputRoot, plan.DragonBones ? "DragonBones" : "Spine",
+                                      Safe(plan.Base));
+            Directory.CreateDirectory(folder);
+
+            var skeleton = Resolve<TextAsset>(manager, plan.Skeleton);
+            var atlas = Resolve<TextAsset>(manager, plan.Atlas);
+
+            if (skeleton != null) Write(folder, plan.SkeletonName, skeleton.m_Script);
+            if (atlas != null) Write(folder, plan.AtlasName, atlas.m_Script);
+
+            var pages = new List<string>();
+            var diagnostic = (string)null;
+            var noName = 0;      // the page name never made it into the texture table
+            var noAsset = 0;     // it is in the table, but the bundle holding it was not loaded
+            var noPlan = 0;      // the asset was found, but nothing could be written from it
+
+            foreach (var page in plan.Pages)
+            {
+                if (!plan.PageRefs.TryGetValue(page, out var reference)) { noName++; continue; }
+
+                var texture = Resolve<Texture2D>(manager, reference);
+                if (texture == null)
+                {
+                    noAsset++;
+
+                    if (noAsset == 1)
+                    {
+                        // Which half is failing: the bundle never got loaded, or it was loaded and the
+                        // path recorded for it no longer matches. Counting the same path id across
+                        // every loaded file, ignoring paths, tells the two apart.
+                        var sameId = 0;
+                        var sameBundle = 0;
+
+                        foreach (var f in manager.AssetsFileList)
+                        {
+                            if (string.Equals(Extractor.SourcePath(f), reference.Bundle, StringComparison.Ordinal))
+                                sameBundle++;
+
+                            foreach (var o in f.Objects)
+                                if (o.m_PathID == reference.PathID) sameId++;
+                        }
+
+                        diagnostic = $"{page}: 记录的 bundle={Path.GetFileName(reference.Bundle)}" +
+                                     $"，被加载 {sameBundle} 个文件，同 pathID 的资产 {sameId} 个";
+                    }
+
+                    continue;
+                }
+
+                var export = Extractor.Plan(texture, options, containers);
+                if (export == null) { noPlan++; continue; }
+
+                export.Write(texture, Path.Combine(folder, page + ".png"), options);
+                pages.Add(page);
+            }
+
+            var missing = noName + noAsset + noPlan;
+
+            // The viewer will not open a Spine model until its own profile exists beside it, and it
+            // needs all three parts to make sense of it.
+            if (!plan.DragonBones && skeleton != null && atlas != null && pages.Count > 0)
+                WriteProfile(folder, plan, pages);
+
+            // Said out loud rather than written in silence: a folder with an atlas and no skeleton
+            // looks like a model until something tries to use it.
+            var incomplete = new List<string>();
+            if (skeleton == null) incomplete.Add("骨架");
+            if (atlas == null) incomplete.Add("图集");
+            if (missing > 0) incomplete.Add($"{missing} 个贴图");
+
+            if (incomplete.Count > 0)
+                log($"{plan.Base}：缺 {string.Join("、", incomplete)}" +
+                    (missing > 0 ? $"（表里无名字 {noName} / bundle 里无资产 {noAsset} / 无导出方案 {noPlan}）" : "") +
+                    (diagnostic != null ? $" [{diagnostic}]" : ""));
+
+            return 1;
+        }
+
+        private static void WriteProfile(string folder, Plan plan, List<string> pages)
         {
             var json = new System.Text.StringBuilder();
 
@@ -606,41 +433,78 @@ namespace AssetStudioMobile
             json.AppendLine("    \"slot_color\": {}");
             json.AppendLine("  },");
             json.AppendLine("  \"options\": { \"tex_type\": 0, \"edge_padding\": false, \"shader_type\": 1 },");
-            json.AppendLine($"  \"skeleton\": {Quote(model.SkeletonName)},");
+            json.AppendLine($"  \"skeleton\": {Quote(plan.SkeletonName)},");
             json.AppendLine("  \"atlases\": [");
             json.AppendLine("    {");
-            json.AppendLine($"      \"atlas\": {Quote(model.AtlasName)},");
+            json.AppendLine($"      \"atlas\": {Quote(plan.AtlasName)},");
             json.AppendLine($"      \"tex_names\": [ {string.Join(", ", pages.Select(Quote))} ],");
             json.AppendLine($"      \"textures\": [ {string.Join(", ", pages.Select(p => Quote(p + ".png")))} ]");
             json.AppendLine("    }");
             json.AppendLine("  ]");
             json.AppendLine("}");
 
-            File.WriteAllText(Path.Combine(folder, model.Base + ".config.json"), json.ToString());
+            File.WriteAllText(Path.Combine(folder, plan.Base + ".config.json"), json.ToString());
         }
 
         /// <summary>A JSON string, quoted, for a file name.</summary>
         private static string Quote(string value)
         {
-            var escaped = (value ?? string.Empty)
-                .Replace("\\", "\\\\").Replace("\"", "\\\"")
-                .Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
-
-            return "\"" + escaped + "\"";
+            var sb = new System.Text.StringBuilder("\"");
+            foreach (var c in value)
+            {
+                if (c == '"' || c == '\\') sb.Append('\\').Append(c);
+                else sb.Append(c);
+            }
+            return sb.Append('"').ToString();
         }
 
         private static void Write(string folder, string name, byte[] bytes)
-            => File.WriteAllBytes(Path.Combine(folder, Safe(name)), bytes);
+        {
+            if (string.IsNullOrEmpty(name) || bytes == null) return;
+            File.WriteAllBytes(Path.Combine(folder, name), bytes);
+        }
 
         private static string Safe(string name)
         {
             if (string.IsNullOrEmpty(name)) return "unnamed";
 
-            var builder = new System.Text.StringBuilder(name.Length);
+            var sb = new System.Text.StringBuilder(name.Length);
             foreach (var c in name)
-                builder.Append(c < 0x20 || c is '/' or '\\' or ':' or '*' or '?' or '"' or '<' or '>' or '|' ? '_' : c);
+            {
+                if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"'
+                    || c == '<' || c == '>' || c == '|' || c < ' ')
+                {
+                    sb.Append('_');
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
 
-            return builder.ToString();
+            var safe = sb.ToString().Trim().TrimEnd('.');
+            return safe.Length == 0 ? "unnamed" : safe;
+        }
+
+        /// <summary>
+        /// Every texture the manager holds, by name: an atlas names its pages, and a page may be in a
+        /// bundle no part of the model otherwise points at.
+        /// </summary>
+        public static Dictionary<string, Ref> TextureRefs(AssetsManager manager)
+        {
+            var textures = new Dictionary<string, Ref>(StringComparer.Ordinal);
+
+            foreach (var file in manager.AssetsFileList)
+            {
+                var bundle = Extractor.SourcePath(file);
+                foreach (var obj in file.Objects)
+                {
+                    if (obj is Texture2D texture && !string.IsNullOrEmpty(texture.m_Name))
+                        textures[texture.m_Name] = new Ref(bundle, texture.m_PathID);
+                }
+            }
+
+            return textures;
         }
     }
 }

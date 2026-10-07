@@ -627,19 +627,6 @@ namespace AssetStudioMobile
             _loadedFiles += loaded;
             _loadedObjects += objects;
 
-            try
-            {
-                System.IO.File.AppendAllLines(System.IO.Path.Combine(
-                    Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath
-                        ?? Android.App.Application.Context.FilesDir.AbsolutePath,
-                    "load-report.txt"),
-                    new[]
-                    {
-                        $"加载 {files.Count} 个 → 读出 {loaded} 个文件",
-                    }.Concat(files.Select(f => $"    {f.Path}")));
-            }
-            catch { }
-
             if (loaded > 0) return;
 
             // Nothing came of handing over the files themselves. This game's cache stores a bundle as
@@ -1142,16 +1129,6 @@ namespace AssetStudioMobile
             var groups = new Dictionary<string, ModelGroup>(StringComparer.Ordinal);
             var batches = new List<(int Start, int Count)>(ModelBatches(_candidates));
 
-            // Instrumentation, not a change to how anything works. The export pairs the way it always
-            // has; this records what that pairing left on the floor, one line per asset per batch, in a
-            // file because it runs to thousands of lines.
-            var report = new List<string>();
-            var reportPath = Path.Combine(
-                Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath
-                    ?? Android.App.Application.Context.FilesDir.AbsolutePath,
-                "survey-report.txt");
-            try { if (File.Exists(reportPath)) File.Delete(reportPath); } catch { }
-
             // The parts are found through container paths, not through references, so following a
             // bundle's externals would only pour the tree into memory.
             var previous = _assetsManager.LoadDependencies;
@@ -1170,18 +1147,6 @@ namespace AssetStudioMobile
                 var containers = ContainersIn(_assetsManager);
                 var emitted = 0;
 
-                if (what == "骨骼动画")
-                {
-                    try
-                    {
-                        report.Add($"== 第 {b + 1} 批，候选 {count} 个 ==");
-                        for (var k = 0; k < count && k < 2; k++)
-                            report.Add($"   候选路径: {_candidates[start + k].Path}");
-                        report.AddRange(SkeletonExport.Explain(_assetsManager, containers));
-                    }
-                    catch { }
-                }
-
                 foreach (var (key, sources) in discover(_assetsManager, containers))
                 {
                     if (!groups.TryGetValue(key, out var group))
@@ -1196,24 +1161,9 @@ namespace AssetStudioMobile
                     }
                 }
 
-                report.Add($"   → 本批产出 {emitted} 条零件");
-
                 _assetsManager.Clear();
                 ReleaseBatch();
                 Report(b + 1, batches.Count);
-            }
-
-            if (report.Count > 0)
-            {
-                try
-                {
-                    File.WriteAllLines(reportPath, report);
-                    log($"{what}：配对报告写到 {reportPath}");
-                }
-                catch (Exception ex)
-                {
-                    log($"{what}：配对报告写不出去 {ex.GetType().Name}");
-                }
             }
 
             log($"{what}：扫完 {batches.Count} 批，找到 {groups.Count} 个模型");
@@ -1249,27 +1199,15 @@ namespace AssetStudioMobile
             // skeleton. Keeping what is already loaded fixes both.
             var loaded = new HashSet<int>();
 
-            // Written to a file, not the screen. The screen log cuts a long path off, which is
-            // exactly the thing being looked at here, and this is the third time a diagnostic has
-            // been misread because of the channel it went through.
-            var groupPath = Path.Combine(
-                Android.App.Application.Context.GetExternalFilesDir(null)?.AbsolutePath
-                    ?? Android.App.Application.Context.FilesDir.AbsolutePath,
-                "groups-report.txt");
-            try { if (File.Exists(groupPath)) File.Delete(groupPath); } catch { }
-
             for (var i = 0; i < groups.Count; i++)
             {
                 var group = groups[i];
                 var indexes = new List<int>();
 
-                var unresolved = new List<string>();
-
                 foreach (var source in group.Sources)
                 {
                     var index = CandidateFor(source);
                     if (index >= 0 && !indexes.Contains(index)) indexes.Add(index);
-                    else if (index < 0) unresolved.Add(source);
                 }
 
                 // Deliberately not the batch each part was seen in. Adding those made every group's
@@ -1284,33 +1222,7 @@ namespace AssetStudioMobile
                     continue;
                 }
 
-                var shown = string.Join(" | ", indexes.Take(2).Select(j => _candidates[j].Path));
-                var filesAfterLoad = _assetsManager.AssetsFileList.Count;
-
-                try
-                {
-                    if (filesAfterLoad == 0) retried++;
-
-                    var lines = new List<string>
-                    {
-                        $"[{i + 1}/{groups.Count}] {group.Key} 索引 {indexes.Count} 来源 {group.Sources.Count} 批 {group.BatchCandidates.Count} 读出 {filesAfterLoad}",
-                    };
-                    foreach (var j in indexes) lines.Add($"    候选: {_candidates[j].Path}");
-                    foreach (var source in unresolved) lines.Add($"    **无法解析的来源: {source}");
-                    File.AppendAllLines(groupPath, lines);
-                }
-                catch { }
-                log($"{what}：[B6] [{i + 1}/{groups.Count}] {group.Key}" +
-                    $"（索引 {indexes.Count} / 来源 {group.Sources.Count} / 批 {group.BatchCandidates.Count}）{shown}");
-
-                if (what == "骨骼动画")
-                {
-                    try
-                    {
-                        log($"    载入后：{SkeletonExport.CountParts(_assetsManager, ContainersIn(_assetsManager))}");
-                    }
-                    catch { }
-                }
+                log($"{what}：[{i + 1}/{groups.Count}] {group.Key}（{indexes.Count} 个 bundle）");
 
                 var alreadyLoaded = indexes.All(loaded.Contains);
 
@@ -1408,13 +1320,144 @@ namespace AssetStudioMobile
             Directory.CreateDirectory(outputRoot);
             log ??= _ => { };
 
-            // See ExportLive2D.
+            // Whatever filter the preview or the index left on the manager, it is not wanted here.
             _assetsManager.ClearAssetFilter();
 
-            var groups = DiscoverModels(SkeletonExport.Discover, "骨骼动画", log);
-            return ExportModels(groups, "骨骼动画",
-                (manager, containers) => SkeletonExport.Export(manager, containers, outputRoot, options, log),
-                log);
+            var models = new Dictionary<string, SkeletonExport.Plan>(StringComparer.Ordinal);
+            var textures = new Dictionary<string, SkeletonExport.Ref>(StringComparer.Ordinal);
+            var batches = new List<(int Start, int Count)>(ModelBatches(_candidates));
+
+            // First pass: read the tree a batch at a time and record which asset is what. Parts are
+            // gathered by the model's name, so a model whose skeleton and atlas sit in different
+            // bundles still arrives as one model -- and nothing is written yet, which is the point:
+            // what an asset is gets decided once, from its content, and handed to the writer as a
+            // reference rather than left for a second, name-based guess to get wrong.
+            var previous = _assetsManager.LoadDependencies;
+            _assetsManager.LoadDependencies = false;
+            try
+            {
+                for (var b = 0; b < batches.Count; b++)
+                {
+                    var (start, count) = batches[b];
+
+                    _assetsManager.Clear();
+                    _indexedCandidate = -1;
+                    LoadBatch(start, count);
+
+                    foreach (var part in SkeletonExport.Discover(_assetsManager, ContainersIn(_assetsManager)))
+                    {
+                        if (!models.TryGetValue(part.Key, out var model))
+                        {
+                            models[part.Key] = model = new SkeletonExport.Plan
+                            {
+                                Key = part.Key,
+                                Base = part.Base,
+                                DragonBones = part.DragonBones,
+                            };
+                        }
+
+                        if (part.Skeleton.IsSet && !model.Skeleton.IsSet)
+                        {
+                            model.Skeleton = part.Skeleton;
+                            model.SkeletonName = part.SkeletonName;
+                        }
+
+                        if (part.Atlas.IsSet && !model.Atlas.IsSet)
+                        {
+                            model.Atlas = part.Atlas;
+                            model.AtlasName = part.AtlasName;
+                        }
+
+                        foreach (var page in part.Pages)
+                            if (!model.Pages.Contains(page)) model.Pages.Add(page);
+
+                        foreach (var source in part.Sources) model.Sources.Add(source);
+                    }
+
+                    foreach (var pair in SkeletonExport.TextureRefs(_assetsManager))
+                        textures[pair.Key] = pair.Value;
+
+                    _assetsManager.Clear();
+                    ReleaseBatch();
+                    Report(b + 1, batches.Count);
+                }
+            }
+            finally
+            {
+                _assetsManager.LoadDependencies = previous;
+            }
+
+            // An atlas names its pages and a page may be in a bundle no part of the model points at,
+            // so the textures are traced once every batch has been read.
+            foreach (var model in models.Values)
+            {
+                foreach (var page in model.Pages)
+                {
+                    if (!textures.TryGetValue(page, out var reference)) continue;
+
+                    model.PageRefs[page] = reference;
+                    if (!string.IsNullOrEmpty(reference.Bundle)) model.Sources.Add(reference.Bundle);
+                }
+            }
+
+            log($"骨骼动画：扫完 {batches.Count} 批，找到 {models.Count} 个模型");
+
+            // Second pass: load each model's bundles and write exactly what the first pass named.
+            var written = 0;
+            var loaded = new HashSet<int>();
+
+            foreach (var model in models.Values.OrderBy(m => m.Base, StringComparer.Ordinal))
+            {
+                var indexes = new List<int>();
+                foreach (var source in model.Sources)
+                {
+                    var index = CandidateFor(source);
+                    if (index >= 0 && !indexes.Contains(index)) indexes.Add(index);
+                }
+
+                // Only a model with an atlas is a model. An extension-less TextAsset is a skeleton
+                // candidate whether or not it belongs to anything, so the ones that never found an
+                // atlas are dropped here rather than written out as folders of their own.
+                if (!model.Atlas.IsSet) continue;
+
+                if (indexes.Count == 0)
+                {
+                    log($"{model.Base}：找不到它所在的 bundle");
+                    continue;
+                }
+
+                if (!indexes.All(loaded.Contains))
+                {
+                    _assetsManager.Clear();
+                    loaded.Clear();
+
+                    var loadPrevious = _assetsManager.LoadDependencies;
+                    _assetsManager.LoadDependencies = false;
+                    try
+                    {
+                        LoadTogether(indexes.Select(i => _candidates[i]).ToList());
+                    }
+                    finally
+                    {
+                        _assetsManager.LoadDependencies = loadPrevious;
+                    }
+
+                    foreach (var index in indexes) loaded.Add(index);
+                }
+
+                try
+                {
+                    written += SkeletonExport.Write(_assetsManager, ContainersIn(_assetsManager),
+                                                    outputRoot, options, log, model);
+                }
+                catch (Exception ex)
+                {
+                    log($"{model.Base}：导出失败 {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            log($"骨骼动画：已导出 {written} 个模型到 {outputRoot}");
+            return written;
         }
 
         public ExportReport Export(string outputRoot, ExportOptions options)
