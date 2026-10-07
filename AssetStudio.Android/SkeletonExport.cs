@@ -153,6 +153,97 @@ namespace AssetStudioMobile
         private static readonly string[] PageProperties = { "size:", "format:", "filter:", "repeat:", "pma:" };
         private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".webp" };
 
+        private static readonly string[] IdleNames = { "idle", "idel" };
+        private static readonly string[] TapNames = { "tap", "touch" };
+
+        /// <summary>
+        /// The skeleton's own animation names, in the order the file holds them.
+        ///
+        /// A JSON skeleton states them, so they are read. A binary one keeps them as inline,
+        /// length-prefixed strings -- bone and slot names go through its string table, but an
+        /// animation's name is written where it is used -- so the bytes are walked for strings that
+        /// look like names.
+        /// </summary>
+        private static List<string> AnimationNames(byte[] bytes)
+        {
+            var names = new List<string>();
+            if (bytes == null || bytes.Length == 0) return names;
+
+            if (bytes[0] == (byte)'{')
+            {
+                try
+                {
+                    using var document = System.Text.Json.JsonDocument.Parse(bytes);
+                    if (document.RootElement.TryGetProperty("animations", out var animations)
+                        && animations.ValueKind == System.Text.Json.JsonValueKind.Object)
+                    {
+                        foreach (var property in animations.EnumerateObject()) names.Add(property.Name);
+                    }
+                }
+                catch { }
+
+                return names;
+            }
+
+            var i = 0;
+            while (i < bytes.Length)
+            {
+                var length = bytes[i];
+                if (length >= 3 && length <= 64 && i + length <= bytes.Length)
+                {
+                    var text = true;
+                    for (var k = i + 1; k < i + length; k++)
+                    {
+                        var c = bytes[k];
+                        if (c < 32 || c > 126) { text = false; break; }
+                    }
+
+                    if (text)
+                    {
+                        names.Add(System.Text.Encoding.ASCII.GetString(bytes, i + 1, length - 1));
+                        i += length;
+                        continue;
+                    }
+                }
+
+                i++;
+            }
+
+            return names;
+        }
+
+        /// <summary>
+        /// The one animation to play, chosen by name: idle first, then whatever the game called the
+        /// tap. Only these two are asked for -- they are what makes a model move and respond to a
+        /// click -- and looking for them by name keeps the byte walk from having to tell a real
+        /// animation from a coincidence.
+        /// </summary>
+        private static string PickMotion(List<string> names, string[] wanted)
+        {
+            foreach (var name in names)
+            {
+                foreach (var want in wanted)
+                {
+                    if (string.Equals(name, want, StringComparison.OrdinalIgnoreCase)) return name;
+                }
+            }
+
+            // "Idle_01", "Tap01" and the like: still the same motion.
+            foreach (var name in names)
+            {
+                foreach (var want in wanted)
+                {
+                    if (name.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0
+                        && name.Length <= want.Length + 4)
+                    {
+                        return name;
+                    }
+                }
+            }
+
+            return null;
+        }
+
         /// <summary>The texture a DragonBones atlas names, which it calls "imagePath".</summary>
         private static List<string> DragonPages(byte[] bytes)
         {
@@ -426,7 +517,7 @@ namespace AssetStudioMobile
             // The viewer will not open a Spine model until its own profile exists beside it, and it
             // needs all three parts to make sense of it.
             if (!plan.DragonBones && skeleton != null && atlas != null && pages.Count > 0)
-                WriteProfile(folder, plan, pages);
+                WriteProfile(folder, plan, pages, skeleton.m_Script);
 
             // Said out loud rather than written in silence: a folder with an atlas and no skeleton
             // looks like a model until something tries to use it.
@@ -443,7 +534,7 @@ namespace AssetStudioMobile
             return 1;
         }
 
-        private static void WriteProfile(string folder, Plan plan, List<string> pages)
+        private static void WriteProfile(string folder, Plan plan, List<string> pages, byte[] skeletonBytes)
         {
             var json = new System.Text.StringBuilder();
 
@@ -467,6 +558,23 @@ namespace AssetStudioMobile
             json.AppendLine("    \"slot_color\": {}");
             json.AppendLine("  },");
             json.AppendLine("  \"options\": { \"tex_type\": 0, \"edge_padding\": false, \"shader_type\": 1 },");
+            // What to play. EX Studio does not move a model whose profile names no motion, and it
+            // reads the name out of the skeleton itself -- which is why the name has to be the one
+            // the file holds, "Mood/1_General" and all, and not a prettied-up version of it.
+            var names = AnimationNames(skeletonBytes);
+            var idle = PickMotion(names, IdleNames);
+            var tap = PickMotion(names, TapNames);
+
+            if (idle != null || tap != null)
+            {
+                json.AppendLine("  \"motions\": {");
+                var entries = new List<string>();
+                if (idle != null) entries.Add($"    \"idle\": [ {{ \"file\": {Quote(idle)} }} ]");
+                if (tap != null) entries.Add($"    \"tap\": [ {{ \"file\": {Quote(tap)} }} ]");
+                json.AppendLine(string.Join(",\n", entries));
+                json.AppendLine("  },");
+            }
+
             json.AppendLine($"  \"skeleton\": {Quote(plan.SkeletonName)},");
             json.AppendLine("  \"atlases\": [");
             json.AppendLine("    {");
