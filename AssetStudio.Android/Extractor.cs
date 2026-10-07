@@ -1400,6 +1400,13 @@ namespace AssetStudioMobile
                 }
             }
 
+            // An extension-less TextAsset is a skeleton candidate whether or not it belongs to anything,
+            // so the survey collects a great many names that never become models. A model is something
+            // with an atlas; the rest are dropped here, which keeps the count honest and the second pass
+            // down to what will actually be written.
+            foreach (var key in models.Where(m => !m.Value.Atlas.IsSet).Select(m => m.Key).ToList())
+                models.Remove(key);
+
             log($"骨骼动画：扫完 {batches.Count} 批，找到 {models.Count} 个模型");
 
             // Second pass: load each model's bundles and write exactly what the first pass named.

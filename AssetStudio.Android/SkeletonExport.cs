@@ -467,52 +467,21 @@ namespace AssetStudioMobile
             if (atlas != null) Write(folder, plan.AtlasName, atlas.m_Script);
 
             var pages = new List<string>();
-            var diagnostic = (string)null;
-            var noName = 0;      // the page name never made it into the texture table
-            var noAsset = 0;     // it is in the table, but the bundle holding it was not loaded
-            var noPlan = 0;      // the asset was found, but nothing could be written from it
+            var missing = 0;
 
             foreach (var page in plan.Pages)
             {
-                if (!plan.PageRefs.TryGetValue(page, out var reference)) { noName++; continue; }
+                if (!plan.PageRefs.TryGetValue(page, out var reference)) { missing++; continue; }
 
                 var texture = Resolve<Texture2D>(manager, reference);
-                if (texture == null)
-                {
-                    noAsset++;
-
-                    if (noAsset == 1)
-                    {
-                        // Which half is failing: the bundle never got loaded, or it was loaded and the
-                        // path recorded for it no longer matches. Counting the same path id across
-                        // every loaded file, ignoring paths, tells the two apart.
-                        var sameId = 0;
-                        var sameBundle = 0;
-
-                        foreach (var f in manager.AssetsFileList)
-                        {
-                            if (string.Equals(Extractor.SourcePath(f), reference.Bundle, StringComparison.Ordinal))
-                                sameBundle++;
-
-                            foreach (var o in f.Objects)
-                                if (o.m_PathID == reference.PathID) sameId++;
-                        }
-
-                        diagnostic = $"{page}: 记录的 bundle={Path.GetFileName(reference.Bundle)}" +
-                                     $"，被加载 {sameBundle} 个文件，同 pathID 的资产 {sameId} 个";
-                    }
-
-                    continue;
-                }
+                if (texture == null) { missing++; continue; }
 
                 var export = Extractor.Plan(texture, options, containers);
-                if (export == null) { noPlan++; continue; }
+                if (export == null) { missing++; continue; }
 
                 export.Write(texture, Path.Combine(folder, page + ".png"), options);
                 pages.Add(page);
             }
-
-            var missing = noName + noAsset + noPlan;
 
             // The viewer will not open a Spine model until its own profile exists beside it, and it
             // needs all three parts to make sense of it.
@@ -527,9 +496,7 @@ namespace AssetStudioMobile
             if (missing > 0) incomplete.Add($"{missing} 个贴图");
 
             if (incomplete.Count > 0)
-                log($"{plan.Base}：缺 {string.Join("、", incomplete)}" +
-                    (missing > 0 ? $"（表里无名字 {noName} / bundle 里无资产 {noAsset} / 无导出方案 {noPlan}）" : "") +
-                    (diagnostic != null ? $" [{diagnostic}]" : ""));
+                log($"{plan.Base}：缺 {string.Join("、", incomplete)}");
 
             return 1;
         }
