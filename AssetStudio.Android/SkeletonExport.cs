@@ -62,6 +62,11 @@ namespace AssetStudioMobile
             public readonly HashSet<string> Sources = new HashSet<string>(StringComparer.Ordinal);
         }
 
+        private static string Trim(string name, string suffix)
+            => name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) && name.Length > suffix.Length
+                ? name.Substring(0, name.Length - suffix.Length)
+                : null;
+
         private static string Head(byte[] bytes, int limit)
         {
             try { return System.Text.Encoding.UTF8.GetString(bytes, 0, Math.Min(bytes.Length, limit)); }
@@ -148,6 +153,22 @@ namespace AssetStudioMobile
         private static readonly string[] PageProperties = { "size:", "format:", "filter:", "repeat:", "pma:" };
         private static readonly string[] ImageExtensions = { ".png", ".jpg", ".jpeg", ".webp" };
 
+        /// <summary>The texture a DragonBones atlas names, which it calls "imagePath".</summary>
+        private static List<string> DragonPages(byte[] bytes)
+        {
+            var pages = new List<string>();
+            if (bytes == null || bytes.Length == 0) return pages;
+
+            foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                         Head(bytes, 1 << 20), "\"imagePath\"\\s*:\\s*\"([^\"]+)\""))
+            {
+                var name = Path.GetFileNameWithoutExtension(match.Groups[1].Value);
+                if (!string.IsNullOrEmpty(name) && !pages.Contains(name)) pages.Add(name);
+            }
+
+            return pages;
+        }
+
         /// <summary>
         /// Every page an atlas declares, in order.
         ///
@@ -224,15 +245,19 @@ namespace AssetStudioMobile
                         dragon = false;
                         isAtlas = false;
                     }
-                    else if (name.EndsWith("_tex.json", StringComparison.OrdinalIgnoreCase))
+                    else if (Trim(name, "_tex.json") != null || Trim(name, "_tex") != null)
                     {
-                        baseName = name.Substring(0, name.Length - "_tex.json".Length);
+                        // DragonBones names its two halves "X_tex" and "X_ske". Whether the game also
+                        // appends ".json" varies, and both forms have to be accepted -- taking only
+                        // "_tex.json" sent "_tex" down the extension-less branch, where it became a
+                        // skeleton under a name of its own and met nothing.
+                        baseName = Trim(name, "_tex.json") ?? Trim(name, "_tex");
                         dragon = true;
                         isAtlas = true;
                     }
-                    else if (name.EndsWith("_ske.json", StringComparison.OrdinalIgnoreCase))
+                    else if (Trim(name, "_ske.json") != null || Trim(name, "_ske") != null)
                     {
-                        baseName = name.Substring(0, name.Length - "_ske.json".Length);
+                        baseName = Trim(name, "_ske.json") ?? Trim(name, "_ske");
                         dragon = true;
                         isAtlas = false;
                     }
@@ -272,7 +297,16 @@ namespace AssetStudioMobile
                         plan.AtlasName = WrittenName(name);
 
                         // The pages the atlas itself names, which is where "x", "x_2", "x_3" come from.
-                        foreach (var page in PageNames(asset.m_Script)) plan.Pages.Add(page);
+                        // A DragonBones atlas is JSON and names its one texture in "imagePath" instead.
+                        if (dragon)
+                        {
+                            foreach (var page in DragonPages(asset.m_Script)) plan.Pages.Add(page);
+                            if (plan.Pages.Count == 0) plan.Pages.Add(baseName + "_tex");
+                        }
+                        else
+                        {
+                            foreach (var page in PageNames(asset.m_Script)) plan.Pages.Add(page);
+                        }
                     }
                     else
                     {
