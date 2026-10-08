@@ -141,13 +141,19 @@ namespace AssetStudioMobile
         /// skeleton that is called "M095_Spine" is published under "..._SkeletonData.asset" -- which
         /// nothing else refers to and which the viewer's own profile dialog does not show.
         /// </summary>
-        private static string WrittenName(string name)
+        private static string WrittenName(string name, bool dragonBones)
         {
-            // As told: a name that carries its own extension is written as it is, and one without an
-            // extension gets ".asset". The container's extension is deliberately not used -- it is the
-            // game's internal name for the bundle entry, and taking it is what put an atlas's bytes
-            // into a file called ".prefab".
-            return Path.HasExtension(name) ? name : name + ".asset";
+            // A name that carries its own extension is written as it is. One without an extension is
+            // given the extension its family uses: DragonBones publishes its two halves as JSON, and
+            // its viewer goes by that -- a "_tex.asset" is loaded and then never shows a picture --
+            // while a Spine skeleton or atlas takes ".asset", which is what the game publishes it
+            // under and what the viewer's own profile dialog names.
+            //
+            // The container's extension is deliberately not used. It is the game's internal name for
+            // the bundle entry, and taking it is what put an atlas's bytes into a file called
+            // ".prefab".
+            if (Path.HasExtension(name)) return name;
+            return dragonBones ? name + ".json" : name + ".asset";
         }
 
         private static readonly string[] PageProperties = { "size:", "format:", "filter:", "repeat:", "pma:" };
@@ -385,7 +391,7 @@ namespace AssetStudioMobile
                     if (isAtlas)
                     {
                         plan.Atlas = reference;
-                        plan.AtlasName = WrittenName(name);
+                        plan.AtlasName = WrittenName(name, dragon);
 
                         // The pages the atlas itself names, which is where "x", "x_2", "x_3" come from.
                         // A DragonBones atlas is JSON and names its one texture in "imagePath" instead.
@@ -402,7 +408,7 @@ namespace AssetStudioMobile
                     else
                     {
                         plan.Skeleton = reference;
-                        plan.SkeletonName = WrittenName(name);
+                        plan.SkeletonName = WrittenName(name, dragon);
                     }
 
                     if (!string.IsNullOrEmpty(bundle)) plan.Sources.Add(bundle);
