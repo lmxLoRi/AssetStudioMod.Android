@@ -80,12 +80,26 @@ jobs:
       # (-r -d if the install has to go backwards). AndroidPackageFormats=apk skips the .aab.
       - name: Publish APK (${{ matrix.abi }})
         run: |
+          # A tag names the version: pushing v0.19.1 produces an APK that reports 0.19.1. A branch
+          # build keeps whatever the project file says, which is what the artifact builds want.
+          #
+          # ApplicationVersion (the integer code Android compares) is left alone on purpose. It only
+          # has to increase for a store to accept an update; installing over the top with adb does
+          # not look at it, and inventing one per build would make the APK's identity less useful,
+          # not more.
+          version=""
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="-p:ApplicationDisplayVersion=${GITHUB_REF_NAME#v}"
+            echo "tagging this build as $GITHUB_REF_NAME"
+          fi
+
           dotnet publish "$PROJECT" \
             -c Release \
             -f net10.0-android \
             -r "${{ matrix.rid }}" \
             -p:AndroidPackageFormats=apk \
             -p:JavaSdkDirectory="$JAVA_HOME" \
+            $version \
             --nologo
 
       - name: Collect the APK
