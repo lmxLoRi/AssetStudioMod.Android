@@ -8,6 +8,23 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <ApplicationId>com.aelurum.assetstudiomod</ApplicationId>
     <ApplicationVersion>1</ApplicationVersion>
+    <!--
+      The signing key, committed on purpose.
+
+      Android only installs an update over an app signed with the same key. Without a keystore here
+      the Android SDK generates a fresh debug key per machine, so every CI release would carry a
+      different signature and installing one over the last would fail with
+      INSTALL_FAILED_UPDATE_INCOMPATIBLE, and the user would have to uninstall first, losing the app's
+      data. This is the standard Android debug key (alias androiddebugkey, password android), which
+      is public by design: the only thing it can do is sign an APK that Android treats as an update
+      to this one, which for an app people install by hand from the repository is the intended
+      tradeoff. Releases made here and builds made locally therefore share one signature.
+    -->
+    <AndroidSigningKeyStore>$(MSBuildProjectDirectory)/debug.keystore</AndroidSigningKeyStore>
+    <AndroidSigningStorePass>android</AndroidSigningStorePass>
+    <AndroidSigningKeyAlias>androiddebugkey</AndroidSigningKeyAlias>
+    <AndroidSigningKeyPass>android</AndroidSigningKeyPass>
+
     <ApplicationDisplayVersion>0.19.0</ApplicationDisplayVersion>
     <RootNamespace>AssetStudioMobile</RootNamespace>
 
