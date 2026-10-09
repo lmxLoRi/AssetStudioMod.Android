@@ -20,6 +20,7 @@
       to this one, which for an app people install by hand from the repository is the intended
       tradeoff. Releases made here and builds made locally therefore share one signature.
     -->
+    <AndroidKeyStore>true</AndroidKeyStore>
     <AndroidSigningKeyStore>$(MSBuildProjectDirectory)/debug.keystore</AndroidSigningKeyStore>
     <AndroidSigningStorePass>android</AndroidSigningStorePass>
     <AndroidSigningKeyAlias>androiddebugkey</AndroidSigningKeyAlias>
