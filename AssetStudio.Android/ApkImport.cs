@@ -140,12 +140,13 @@ namespace AssetStudioMobile
         /// one file rather than a tree.
         /// </summary>
         public static string StagePickedFile(Context context, Android.Net.Uri uri, string stagingRoot,
-                                            Action<string> log)
+                                            Action<string> log, out string packageName)
         {
+            packageName = null;
             var name = Sanitize(ImportUtils.LeafNameOf(uri) ?? "picked");
-            var dest = Path.Combine(stagingRoot, "apk", "picked");
-            Directory.CreateDirectory(dest);
-            var target = Path.Combine(dest, name);
+            var incoming = Path.Combine(stagingRoot, "apk", "incoming");
+            Directory.CreateDirectory(incoming);
+            var target = Path.Combine(incoming, name);
 
             try
             {
@@ -160,8 +161,44 @@ namespace AssetStudioMobile
                 return null;
             }
 
-            log?.Invoke($"已暂存 {name}，{new FileInfo(target).Length / 1048576} MB");
+            // Filed under the package the APK declares, not under a generic "picked". Two things
+            // follow from that: two different APKs stop landing in one folder, and the folder says
+            // which game it is, which is the name the export goes under.
+            packageName = PackageOf(context, target);
+            if (string.IsNullOrEmpty(packageName))
+                packageName = Path.GetFileNameWithoutExtension(name);
+
+            var dest = Path.Combine(stagingRoot, "apk", Sanitize(packageName));
+            try
+            {
+                Directory.CreateDirectory(dest);
+                var moved = Path.Combine(dest, name);
+                if (File.Exists(moved)) File.Delete(moved);
+                File.Move(target, moved);
+            }
+            catch
+            {
+                dest = incoming;
+            }
+
+            log?.Invoke($"已暂存 {name}，{new FileInfo(Path.Combine(dest, name)).Length / 1048576} MB" +
+                        $"，包名 {packageName}");
             return dest;
+        }
+
+        /// <summary>The package an APK declares, or null when it cannot be read.</summary>
+        public static string PackageOf(Context context, string apkPath)
+        {
+            try
+            {
+                var info = context.PackageManager.GetPackageArchiveInfo(
+                    apkPath, (Android.Content.PM.PackageInfoFlags)0);
+                return info?.PackageName;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private static bool TryCopyDirect(string src, string dest, out string why)

@@ -47,10 +47,14 @@ namespace AssetStudioMobile
         /// </summary>
         private string _inputNamespace = "external";
 
-        private void SetInput(string path)
+        private void SetInput(string path, string packageName = null)
         {
             _inputDir = path;
-            _inputNamespace = InputNamespace(path);
+
+            // Preferred when the caller knows it. Reading it back out of the path cannot work for a
+            // staged APK: the whole path lives under this app's own Android/data, so the only package
+            // name in it is ours -- and the export was filed under our package instead of the game's.
+            _inputNamespace = string.IsNullOrEmpty(packageName) ? InputNamespace(path) : Sanitize(packageName);
         }
 
         /// <summary>And one export at a time: they share the extractor and its manager.</summary>
@@ -622,7 +626,7 @@ namespace AssetStudioMobile
                     SetStatus("cannot read that app's APK");
                     return;
                 }
-                SetInput(dir);
+                SetInput(dir, app.PackageName);
                 RunOnUiThread(() => _panel.InputPath.Text = dir);
                 Scan();
             });
@@ -655,14 +659,14 @@ namespace AssetStudioMobile
 
                 // Falls back to staging: a cloud provider, or a URI with no file behind it.
                 var external = GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;
-                var dir = ApkImport.StagePickedFile(this, uri, external, Append);
+                var dir = ApkImport.StagePickedFile(this, uri, external, Append, out var packageName);
                 if (dir == null)
                 {
                     SetStatus("读不了所选文件");
                     return;
                 }
 
-                SetInput(dir);
+                SetInput(dir, packageName);
                 RunOnUiThread(() => _panel.InputPath.Text = dir);
                 Scan();
             });
@@ -1011,7 +1015,13 @@ namespace AssetStudioMobile
             // Package (or parent) first, then the input's own name. Two trees can end in the same
             // segment -- every game has a "files", a "UnityCache", a "res" -- and with only that
             // segment, the second export landed inside the first one's folder.
-            return Path.Combine(baseDir, _inputNamespace, Sanitize(InputName()));
+            //
+            // For an app the two are the same word, so it is not repeated: an APK staged under its
+            // package goes to <base>/<package>, not <base>/<package>/<package>.
+            var name = Sanitize(InputName());
+            return string.Equals(_inputNamespace, name, StringComparison.OrdinalIgnoreCase)
+                ? Path.Combine(baseDir, name)
+                : Path.Combine(baseDir, _inputNamespace, name);
         }
 
         /// <summary>
@@ -1022,11 +1032,25 @@ namespace AssetStudioMobile
         /// anything else the parent's name is enough, because the parent is part of what makes the
         /// path unique to begin with.
         /// </summary>
+        /// <summary>This app's own package, which an input can never be.</summary>
+        private static string OwnPackageName =>
+            Android.App.Application.Context.PackageName;
+
         private static string InputNamespace(string path)
         {
             if (!string.IsNullOrEmpty(path))
             {
                 var parts = path.Replace('\\', '/').Split('/');
+
+                // This app's own staging layout, <external>/apk/<package>. The package is the segment
+                // after "apk", and saying so beats inferring it: the whole path sits under this app's
+                // own Android/data, so the only package name in it is ours -- which is how the game's
+                // name was being lost.
+                for (var i = 0; i + 1 < parts.Length; i++)
+                {
+                    if (parts[i].Equals("apk", StringComparison.OrdinalIgnoreCase) && parts[i + 1].Length > 0)
+                        return Sanitize(parts[i + 1]);
+                }
 
                 // The last one, not the first. A staged tree lives under this app's own
                 // Android/data/<our package>/files/staged/<the input>, so the first match is our own
@@ -1038,7 +1062,13 @@ namespace AssetStudioMobile
                     if (!parts[i + 1].Equals("data", StringComparison.OrdinalIgnoreCase)
                         && !parts[i + 1].Equals("obb", StringComparison.OrdinalIgnoreCase)) continue;
 
-                    if (parts[i + 2].Length > 0) return Sanitize(parts[i + 2]);
+                    if (parts[i + 2].Length == 0) continue;
+
+                    // Our own package is never the answer: an input cannot be this app's own data,
+                    // and a staged tree sits under it, which is how the game's name got lost.
+                    if (parts[i + 2].Equals(OwnPackageName, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    return Sanitize(parts[i + 2]);
                 }
             }
 
@@ -1050,16 +1080,15 @@ namespace AssetStudioMobile
         /// <summary>The input's last path segment, without its extension.</summary>
         private string InputName()
         {
-            var path = _inputDir?.TrimEnd('/');
-            if (string.IsNullOrEmpty(path)) return "导出";
+            var trimmed = (_inputDir ?? string.Empty).TrimEnd('/');
+            if (trimmed.Length == 0) return "bundles";
 
-            var name = Path.GetFileName(path);
-            if (string.IsNullOrEmpty(name)) return "导出";
+            var leaf = Path.GetFileName(trimmed);
 
-            // A folder keeps its name; a file drops the extension, so a picked
-            // "NS.daddylove_1.0.0_1.apk" exports into "NS.daddylove_1.0.0_1".
-            var stem = Path.GetFileNameWithoutExtension(name);
-            return string.IsNullOrEmpty(stem) ? name : stem;
+            // A folder keeps its whole name. Only a file has an extension to take off -- and a package
+            // name is full of dots, so treating one as a file cut "com.Nyaatrap.UOHCatcher" down to
+            // "com.Nyaatrap" and filed the export under the wrong name.
+            return Directory.Exists(trimmed) ? leaf : Path.GetFileNameWithoutExtension(leaf);
         }
 
         private static string Sanitize(string label)
