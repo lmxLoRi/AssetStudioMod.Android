@@ -524,7 +524,7 @@ namespace AssetStudioMobile
         private void ApplyDecryptor(Extractor extractor)
         {
             extractor.Decryptor = _decryptor;
-            extractor.DecryptStagingRoot = Path.Combine(FilesRoot(), "decrypted");
+            extractor.DecryptRoot = Path.Combine(FilesRoot(), "decrypted");
         }
 
         private string FilesRoot() => GetExternalFilesDir(null)?.AbsolutePath ?? FilesDir.AbsolutePath;

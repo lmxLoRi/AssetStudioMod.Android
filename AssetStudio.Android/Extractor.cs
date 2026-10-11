@@ -201,7 +201,7 @@ namespace AssetStudioMobile
         internal Scripting.LuaDecryptor Decryptor;
 
         /// <summary>Where rewritten files are written. Required when <see cref="Decryptor"/> is set.</summary>
-        public string DecryptStagingRoot;
+        public string DecryptRoot;
 
         /// <summary>How many files the scan decided were Unity data.</summary>
         public int CandidateCount => _candidates?.Count ?? 0;
@@ -366,6 +366,12 @@ namespace AssetStudioMobile
 
             // 1. Walk. One pass of readdir plus a stat per entry: linear, and parallelising it
             //    only adds contention on the same directory inode.
+            // With a script loaded, everything goes to it first and the loader reads the result.
+            if (Decryptor != null && Decryptor.Active)
+            {
+                full = Scripting.DecryptPass.Run(full, DecryptRoot, Decryptor, LogInfo);
+            }
+
             var everything = File.Exists(full)
                 ? new[] { full }
                 : Directory.GetFiles(full, "*.*", SearchOption.AllDirectories);
@@ -378,17 +384,6 @@ namespace AssetStudioMobile
             //    cache, for one, is ~4900 __data bundles interleaved with ~4900 __info JSON
             //    manifests. Those are identical extensionless shapes, so a name-based filter lets
             //    every manifest through to be opened, sniffed and thrown away again.
-            // Decryption has to happen before the sniff, not before the load: an encrypted bundle
-            // does not look like a bundle, so a file the script can fix would otherwise be dropped
-            // as "not Unity data" and never reach a loader.
-            if (Decryptor != null && Decryptor.Active)
-            {
-                var decryptMark = Stopwatch.GetTimestamp();
-                everything = DecryptAll(everything);
-                LogInfo($"lua：{Decryptor.Name} 跑过 {everything.Length} 个文件 " +
-                        $"({(Stopwatch.GetTimestamp() - decryptMark) * 1000 / Stopwatch.Frequency} ms)");
-            }
-
             var candidates = SniffCandidates(everything);
             var sniffMs = clock.ElapsedMilliseconds;
             clock.Restart();
@@ -794,72 +789,6 @@ namespace AssetStudioMobile
         /// Returns the size alongside the path because the read already had it (fs.Length): batching
         /// needs to know how many bytes it is taking on, and this way that costs no second stat.
         /// </summary>
-        /// <summary>
-        /// Hands every file to the script and returns the paths to load: the rewritten copy for the
-        /// ones it changed, the original for the ones it left alone.
-        ///
-        /// Whole files, because the host cannot know what part of the file a scheme touches. That is
-        /// also why a per-byte Lua loop over a multi-gigabyte tree is impractical -- MoonSharp
-        /// interprets, so the cost is the script's, and a script for a scheme like that wants to be
-        /// written around string.find/string.sub rather than per character.
-        /// </summary>
-        private string[] DecryptAll(string[] files)
-        {
-            var root = string.IsNullOrEmpty(DecryptStagingRoot)
-                ? Path.Combine(Path.GetTempPath(), "assetstudio-decrypted")
-                : DecryptStagingRoot;
-            Directory.CreateDirectory(root);
-
-            var result = new string[files.Length];
-            var rewritten = 0;
-            var failed = 0;
-
-            for (var i = 0; i < files.Length; i++)
-            {
-                var file = files[i];
-                result[i] = file;
-
-                byte[] data;
-                try
-                {
-                    data = File.ReadAllBytes(file);
-                }
-                catch (Exception ex)
-                {
-                    LogWarn($"lua：读不了 {Path.GetFileName(file)}：{ex.Message}");
-                    continue;
-                }
-
-                if (!Decryptor.TryTransform(data, data.Length, Path.GetFileName(file), out var output, out var error))
-                {
-                    if (error != null)
-                    {
-                        failed++;
-
-                        // One broken file is usually every file; a bounded number of lines says so
-                        // without burying the log.
-                        if (failed <= 5) LogWarn($"lua：{Path.GetFileName(file)}：{error}");
-                    }
-                    continue;
-                }
-
-                try
-                {
-                    var target = Path.Combine(root, $"{i:D6}_{Path.GetFileName(file)}");
-                    File.WriteAllBytes(target, output);
-                    result[i] = target;
-                    rewritten++;
-                }
-                catch (Exception ex)
-                {
-                    LogWarn($"lua：写不了解密结果 {Path.GetFileName(file)}：{ex.Message}");
-                }
-            }
-
-            LogInfo($"lua：改写 {rewritten} 个文件，失败 {failed} 个");
-            return result;
-        }
-
         private List<Candidate> SniffCandidates(string[] files)
         {
             var kept = new List<Candidate>(files.Length);
